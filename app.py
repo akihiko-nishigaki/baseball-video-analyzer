@@ -491,8 +491,24 @@ if app_mode == "2動画比較":
             st.caption(f"比較可能フレーム数: {len(mapping)}")
     else:
         # 動作未検出時はフレーム番号をそのまま1:1対応
-        st.info("スイング/投球動作が検出されなかったため、フレーム番号でそのまま比較します。")
-        mapping = [(i, i) for i in range(min(reader_a.total_frames, reader_b.total_frames))]
+        missing = []
+        if not has_motion_a:
+            missing.append("動画A")
+        if not has_motion_b:
+            missing.append("動画B")
+        st.warning(f"{'・'.join(missing)} でスイング/投球動作が検出されませんでした。フレーム番号でそのまま比較します。")
+
+        # 手動オフセットだけ提供
+        manual_offset = st.slider(
+            "手動オフセット（フレーム）",
+            -120, 120, 0,
+            help="＋で動画Bを遅らせる、ーで動画Bを早める",
+            key="manual_offset_fallback",
+        )
+        sync_a, sync_b = 0, manual_offset
+        mapping = align_frames(reader_a.total_frames, reader_b.total_frames, sync_a, sync_b)
+        if not mapping:
+            mapping = [(i, i) for i in range(min(reader_a.total_frames, reader_b.total_frames))]
 
     # --- 同期フレームビューア ---
     st.markdown("---")
