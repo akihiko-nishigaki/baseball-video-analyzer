@@ -557,34 +557,33 @@ if app_mode == "2動画比較":
             st.session_state._cmp_jump_to = min(len(mapping) - 1, compare_idx + 10)
             st.rerun()
 
-    # 並べて表示
-    col_va, col_vb = st.columns(2)
+    # 並べて表示（1枚の合成画像にしてスマホでも横並びを維持）
+    fa = reader_a.get_frame(frame_a_idx)
+    fb = reader_b.get_frame(frame_b_idx)
 
-    with col_va:
-        st.markdown("**動画A**")
-        fa = reader_a.get_frame(frame_a_idx)
-        if fa is not None:
-            lm_a = st.session_state.all_landmarks.get(frame_a_idx)
-            if show_skeleton and lm_a:
-                det = PoseDetector(min_detection_confidence=detection_conf)
-                fa = det.draw_skeleton(fa, lm_a, angle_defs if show_angles_on_video else None)
-                det.close()
-            if show_wrist_trail:
-                fa = draw_wrist_trajectory(fa, st.session_state.all_landmarks, frame_a_idx, trail_length=40)
-            st.image(cv2.cvtColor(fa, cv2.COLOR_BGR2RGB), use_container_width=True)
+    if fa is not None:
+        lm_a = st.session_state.all_landmarks.get(frame_a_idx)
+        if show_skeleton and lm_a:
+            det = PoseDetector(min_detection_confidence=detection_conf)
+            fa = det.draw_skeleton(fa, lm_a, angle_defs if show_angles_on_video else None)
+            det.close()
+        if show_wrist_trail:
+            fa = draw_wrist_trajectory(fa, st.session_state.all_landmarks, frame_a_idx, trail_length=40)
+        # ラベル描画
+        cv2.putText(fa, "A", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 200, 255), 3, cv2.LINE_AA)
 
-    with col_vb:
-        st.markdown("**動画B**")
-        fb = reader_b.get_frame(frame_b_idx)
-        if fb is not None:
-            lm_b = st.session_state.all_landmarks_b.get(frame_b_idx)
-            if show_skeleton and lm_b:
-                det = PoseDetector(min_detection_confidence=detection_conf)
-                fb = det.draw_skeleton(fb, lm_b, angle_defs if show_angles_on_video else None)
-                det.close()
-            if show_wrist_trail:
-                fb = draw_wrist_trajectory(fb, st.session_state.all_landmarks_b, frame_b_idx, trail_length=40)
-            st.image(cv2.cvtColor(fb, cv2.COLOR_BGR2RGB), use_container_width=True)
+    if fb is not None:
+        lm_b = st.session_state.all_landmarks_b.get(frame_b_idx)
+        if show_skeleton and lm_b:
+            det = PoseDetector(min_detection_confidence=detection_conf)
+            fb = det.draw_skeleton(fb, lm_b, angle_defs if show_angles_on_video else None)
+            det.close()
+        if show_wrist_trail:
+            fb = draw_wrist_trajectory(fb, st.session_state.all_landmarks_b, frame_b_idx, trail_length=40)
+        cv2.putText(fb, "B", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 160, 0), 3, cv2.LINE_AA)
+
+    combined = create_side_by_side(fa, fb)
+    st.image(cv2.cvtColor(combined, cv2.COLOR_BGR2RGB), use_container_width=True)
 
     # --- 角度比較テーブル ---
     angle_diffs = compare_angles(
