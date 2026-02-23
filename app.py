@@ -820,22 +820,7 @@ if not st.session_state.is_analyzed:
         release_info = None
         arm_slot_val = None
 
-        if mode == "バッティング" and swings:
-            best_swing = max(swings, key=lambda s: s[3])
-
-            progress.progress(0.85, text="フェーズを分析中...")
-            phases = detect_batting_phases(all_landmarks, wrist_speeds, best_swing, reader.fps)
-
-            progress.progress(0.90, text="体重移動を分析中...")
-            weight_data = calc_weight_shift(all_landmarks, best_swing)
-
-            progress.progress(0.93, text="チェックポイントを分析中...")
-            checkpoints = get_phase_checkpoints(all_landmarks, phases)
-
-            progress.progress(0.96, text="総合評価中...")
-            evaluation = evaluate_batting(all_landmarks, best_swing, weight_data)
-
-        elif mode == "ピッチング":
+        if mode == "ピッチング":
             arm = st.session_state.throwing_arm
             wrist_idx = 16 if arm == "right" else 15
 
@@ -895,54 +880,6 @@ if not st.session_state.is_analyzed:
 # ════════════════════════════════════════════════
 
 swings = st.session_state.swings
-phases = st.session_state.phases
-evaluation = st.session_state.evaluation
-
-# ─── 総合評価カード（バッティングモード時） ───
-if mode == "バッティング" and evaluation:
-    st.markdown("---")
-
-    eval_col1, eval_col2, eval_col3 = st.columns([1, 2, 2])
-
-    with eval_col1:
-        grade = evaluation["grade"]
-        st.markdown(f'<div class="grade-{grade}" style="text-align:center;">{grade}</div>',
-                    unsafe_allow_html=True)
-        st.markdown(f"<div style='text-align:center; font-size:1.5rem;'>"
-                    f"<b>{evaluation['total_score']}</b>/100点</div>",
-                    unsafe_allow_html=True)
-
-    with eval_col2:
-        st.markdown("#### 評価詳細")
-        for d in evaluation["details"]:
-            icon = "✅" if d["status"] == "good" else "⚠️" if d["status"] == "warning" else "❌"
-            st.markdown(f"{icon} **{d['name']}** {d['score']}/{d['max']}")
-            st.progress(int(d["score"] / d["max"] * 100) / 100)
-
-    with eval_col3:
-        st.markdown("#### アドバイス")
-        st.info(evaluation["summary"])
-
-        # スイング情報
-        if swings:
-            best_swing = max(swings, key=lambda s: s[3])
-            metrics = calc_swing_metrics(st.session_state.all_landmarks, best_swing, reader.fps)
-            st.markdown("#### スイングデータ")
-            for k, v in metrics.items():
-                st.text(f"{k}: {v}")
-
-            arc = calc_swing_arc_angle(st.session_state.all_landmarks, best_swing)
-            if arc is not None:
-                if abs(arc) < 10:
-                    arc_type = "レベルスイング"
-                elif arc < 0:
-                    arc_type = "ダウンスイング"
-                else:
-                    arc_type = "アッパースイング"
-                st.text(f"スイング軌道: {arc_type} ({arc:+.1f}°)")
-
-elif mode == "バッティング" and not swings:
-    st.warning("スイングが検出されませんでした。動画にバッティングの動きが含まれているか確認してください。")
 
 
 # ─── ピッチング総合評価（ピッチングモード時） ───
@@ -1067,25 +1004,6 @@ elif mode == "ピッチング" and not pitches:
 
 
 # ─── フェーズタイムライン ───
-# バッティングフェーズ
-if mode == "バッティング" and phases:
-    st.markdown("---")
-    st.markdown("### 🔄 バッティングフェーズ")
-
-    phase_cols = st.columns(len(phases))
-    for i, (key, p_start, p_end) in enumerate(phases):
-        info = BATTING_PHASES[key]
-        with phase_cols[i]:
-            st.markdown(
-                f'<div class="phase-badge" style="background:{info["color"]};">'
-                f'{info["emoji"]} {info["name"]}</div>',
-                unsafe_allow_html=True,
-            )
-            st.caption(f"F{p_start}-{p_end}")
-            if st.button(f"▶ {info['name']}", key=f"phase_{key}"):
-                st.session_state._jump_to = p_start
-                st.rerun()
-
 # ピッチングフェーズ
 if mode == "ピッチング" and pitching_phases:
     st.markdown("---")
@@ -1106,21 +1024,6 @@ if mode == "ピッチング" and pitching_phases:
                 st.rerun()
 
 
-# ─── チェックポイント（バッティング） ───
-if mode == "バッティング" and st.session_state.checkpoints:
-    st.markdown("---")
-    st.markdown("### ✅ フェーズ別チェックポイント")
-
-    for cp in st.session_state.checkpoints:
-        with st.expander(f"{BATTING_PHASES[cp['phase']]['emoji']} {cp['phase_name']}（フレーム {cp['frame']}）"):
-            for check in cp["checks"]:
-                icon = "✅" if check["status"] == "good" else "⚠️" if check["status"] == "warning" else "ℹ️"
-                css_class = f"check-{check['status']}"
-                st.markdown(
-                    f'{icon} <span class="{css_class}"><b>{check["item"]}: {check["value"]}</b></span>'
-                    f' — {check["advice"]}',
-                    unsafe_allow_html=True,
-                )
 
 
 # ─── 動画ビューア ───
@@ -1178,15 +1081,6 @@ if mode == "ピッチング" and pitches:
                 st.session_state._jump_to = p_start
                 st.rerun()
 
-if mode == "バッティング" and swings:
-    swing_cols = st.columns(len(swings) + 1)
-    with swing_cols[0]:
-        st.markdown("**スイング:**")
-    for i, (s_start, s_end, s_peak, s_speed) in enumerate(swings):
-        with swing_cols[i + 1]:
-            if st.button(f"⚾ #{i+1} (F{s_start}-{s_end})", key=f"swing_jump_{i}"):
-                st.session_state._jump_to = s_start
-                st.rerun()
 
 
 # ─── 動画フレーム＋骨格表示 ───
@@ -1248,16 +1142,7 @@ with col_video:
 
 with col_angles:
     # フェーズ表示
-    if mode == "バッティング" and phases:
-        phase_key, phase_info = get_phase_at_frame(phases, frame_idx)
-        if phase_key and phase_info:
-            st.markdown(
-                f'<div class="phase-badge" style="background:{phase_info["color"]};">'
-                f'{phase_info["emoji"]} {phase_info["name"]}</div>',
-                unsafe_allow_html=True,
-            )
-            st.markdown("")
-    elif mode == "ピッチング" and pitching_phases:
+    if mode == "ピッチング" and pitching_phases:
         phase_key, phase_info = get_pitching_phase_at_frame(pitching_phases, frame_idx)
         if phase_key and phase_info:
             st.markdown(
@@ -1279,14 +1164,6 @@ with col_angles:
     if rot is not None:
         st.metric("肩の開き", f"{rot:.1f}°")
 
-    # バッティング: スイング内かどうか
-    if mode == "バッティング":
-        for s_start, s_end, s_peak, _ in swings:
-            if s_start <= frame_idx <= s_end:
-                st.success("⚾ スイング中")
-                if frame_idx == s_peak:
-                    st.markdown("**💥 インパクト！**")
-                break
 
     # ピッチング: 投球内かどうか
     if mode == "ピッチング":
@@ -1298,98 +1175,6 @@ with col_angles:
                 break
 
 
-# ─── 手首速度グラフ ───
-if st.session_state.wrist_speeds:
-    st.markdown("---")
-    st.markdown("### 🏃 手首速度 ＆ 角度推移")
-
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        row_heights=[0.4, 0.6],
-        vertical_spacing=0.08,
-        subplot_titles=("手首速度", "角度推移"),
-    )
-
-    # 手首速度
-    speed_frames = [f for f, _ in st.session_state.wrist_speeds]
-    speed_values = [s for _, s in st.session_state.wrist_speeds]
-    speed_times = [f / reader.fps for f in speed_frames] if reader.fps > 0 else speed_frames
-
-    fig.add_trace(
-        go.Scatter(x=speed_times, y=speed_values, mode="lines",
-                   name="手首速度", line=dict(color="#FF5722", width=2)),
-        row=1, col=1,
-    )
-
-    # スイング区間をハイライト
-    for s_start, s_end, s_peak, _ in swings:
-        t_start = s_start / reader.fps if reader.fps > 0 else s_start
-        t_end = s_end / reader.fps if reader.fps > 0 else s_end
-        fig.add_vrect(
-            x0=t_start, x1=t_end,
-            fillcolor="rgba(255,87,34,0.15)",
-            line_width=0,
-            row=1, col=1,
-        )
-
-    # フェーズをハイライト
-    display_phases = phases if mode == "バッティング" else pitching_phases
-    display_phase_defs = BATTING_PHASES if mode == "バッティング" else PITCHING_PHASE_DEFS
-    for phase_key, p_start, p_end in display_phases:
-        info = display_phase_defs[phase_key]
-        t_start = p_start / reader.fps if reader.fps > 0 else p_start
-        t_end = p_end / reader.fps if reader.fps > 0 else p_end
-        hex_color = info["color"].lstrip("#")
-        r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-        fig.add_vrect(
-            x0=t_start, x1=t_end,
-            fillcolor=f"rgba({r},{g},{b},0.1)",
-            line=dict(color=info["color"], width=1),
-            row=1, col=1,
-            annotation_text=info["name"],
-            annotation_position="top left",
-            annotation_font_size=10,
-        )
-
-    # 角度推移
-    angle_data = []
-    for i in range(reader.total_frames):
-        fa = st.session_state.all_angles.get(i, {})
-        row_data = {"time": i / reader.fps if reader.fps > 0 else i}
-        row_data.update(fa)
-        angle_data.append(row_data)
-
-    df = pd.DataFrame(angle_data)
-    angle_names = [c for c in df.columns if c != "time"]
-    colors = ["#1E88E5", "#F44336", "#4CAF50", "#FFC107", "#9C27B0", "#FF5722"]
-
-    for i, name in enumerate(angle_names):
-        fig.add_trace(
-            go.Scatter(x=df["time"], y=df[name], mode="lines",
-                       name=name, line=dict(color=colors[i % len(colors)], width=2)),
-            row=2, col=1,
-        )
-
-    # 現在位置
-    current_time = frame_idx / reader.fps if reader.fps > 0 else frame_idx
-    for row in [1, 2]:
-        fig.add_vline(
-            x=current_time, line_dash="dash", line_color="white",
-            line_width=2, row=row, col=1,
-        )
-
-    fig.update_layout(
-        height=550,
-        margin=dict(l=40, r=20, t=40, b=40),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        template="plotly_dark",
-    )
-    fig.update_yaxes(title_text="速度", row=1, col=1)
-    fig.update_yaxes(title_text="角度（度）", row=2, col=1)
-    fig.update_xaxes(title_text="時間（秒）", row=2, col=1)
-
-    st.plotly_chart(fig, use_container_width=True)
 
 
 # ─── 体重移動グラフ ───
