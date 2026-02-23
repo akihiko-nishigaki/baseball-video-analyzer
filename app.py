@@ -986,11 +986,16 @@ elif mode == "バッティング" and not swings:
                 detected_frames = sum(1 for lm in st.session_state.all_landmarks.values() if lm is not None)
                 total_frames = len(st.session_state.all_landmarks)
                 st.text(f"骨格検出率: {detected_frames}/{total_frames} フレーム ({detected_frames/max(total_frames,1)*100:.0f}%)")
-                st.text(f"手首速度 - 最大: {max(all_spd):.4f}, 平均: {np.mean(all_spd):.4f}, 標準偏差: {np.std(all_spd):.4f}")
-                threshold = max(0.3, np.mean(all_spd) + 1.0 * np.std(all_spd))
-                st.text(f"適用閾値: {threshold:.4f}")
-                above = sum(1 for s in all_spd if s > threshold)
-                st.text(f"閾値超えフレーム数: {above}")
+                nonzero = [s for s in all_spd if s > 0.001]
+                st.text(f"有効速度フレーム数: {len(nonzero)}/{len(all_spd)}")
+                if nonzero:
+                    st.text(f"手首速度(非ゼロ) - 最大: {max(nonzero):.4f}, 平均: {np.mean(nonzero):.4f}, 中央値: {np.median(nonzero):.4f}")
+                    threshold = np.percentile(nonzero, 70)
+                    st.text(f"適用閾値(70パーセンタイル): {threshold:.4f}")
+                    above = sum(1 for s in all_spd if s > threshold)
+                    st.text(f"閾値超えフレーム数: {above}")
+                else:
+                    st.error("手首の速度を計算できるフレームがありません。骨格検出精度が低い可能性があります。")
 
 
 # ─── ピッチング総合評価（ピッチングモード時） ───
