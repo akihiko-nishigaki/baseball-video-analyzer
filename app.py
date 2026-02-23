@@ -1,0 +1,1475 @@
+"""少年野球フォーム分析ツール v4.0 - Streamlit メインアプリ"""
+
+import streamlit as st
+import cv2
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import os
+import sys
+
+# プロジェクトルートをパスに追加
+sys.path.insert(0, os.path.dirname(__file__))
+
+from src.pose_detector import PoseDetector, KEY_LANDMARKS
+from src.angle_analyzer import (
+    BATTING_ANGLES, PITCHING_ANGLES,
+    analyze_frame_angles, calc_body_rotation, calc_center_of_gravity,
+)
+from src.swing_detector import calc_wrist_speed, detect_swings, calc_swing_metrics, calc_weight_shift
+from src.phase_detector import detect_batting_phases, get_phase_at_frame, get_phase_checkpoints, BATTING_PHASES
+from src.trajectory import draw_wrist_trajectory, draw_bat_path, draw_phase_indicator, calc_swing_arc_angle
+from src.batting_evaluator import evaluate_batting
+from src.pitching_detector import (
+    calc_throwing_arm_speed, detect_pitch_motion, detect_pitching_phases,
+    get_pitching_phase_at_frame, detect_release_point, calc_arm_slot,
+    PITCHING_PHASES as PITCHING_PHASE_DEFS,
+)
+from src.pitching_evaluator import evaluate_pitching
+from src.comparison import (
+    align_frames, compare_angles, compare_evaluations,
+    create_side_by_side, find_sync_point_batting, find_sync_point_pitching,
+    calc_angle_similarity,
+)
+from utils.video_utils import VideoReader, save_uploaded_video
+
+# ─── ページ設定 ───
+st.set_page_config(
+    page_title="少年野球フォーム分析",
+    page_icon="⚾",
+    layout="wide",
+)
+
+# ─── カスタムCSS ───
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2rem;
+        font-weight: bold;
+        color: #1E88E5;
+        margin-bottom: 0.5rem;
+    }
+    .grade-S { color: #FFD700; font-size: 3rem; font-weight: bold; }
+    .grade-A { color: #4CAF50; font-size: 3rem; font-weight: bold; }
+    .grade-B { color: #2196F3; font-size: 3rem; font-weight: bold; }
+    .grade-C { color: #FF9800; font-size: 3rem; font-weight: bold; }
+    .grade-D { color: #F44336; font-size: 3rem; font-weight: bold; }
+    .phase-badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 12px;
+        color: white;
+        font-weight: bold;
+        font-size: 0.9rem;
+    }
+    .check-good { color: #4CAF50; }
+    .check-warn { color: #FF9800; }
+    .check-bad  { color: #F44336; }
+    .stSlider > div > div { padding-top: 0; }
+    /* 動画フレームの高さをビューポートに収める */
+    [data-testid="stImage"] img {
+        max-height: 70vh;
+        width: auto !important;
+        object-fit: contain;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ─── セッション状態の初期化 ───
+def init_session():
+    defaults = {
+        "video_path": None,
+        "current_frame": 0,
+        "is_analyzed": False,
+        "all_landmarks": {},
+        "all_angles": {},
+        "cog_history": [],
+        "rotation_history": [],
+        # Phase 2
+        "wrist_speeds": [],
+        "swings": [],
+        "phases": [],
+        "evaluation": None,
+        "weight_data": [],
+        "checkpoints": [],
+        # Phase 3 (pitching)
+        "pitches": [],
+        "pitching_phases": [],
+        "pitching_evaluation": None,
+        "release_info": None,
+        "arm_slot": None,
+        "throwing_arm": "right",
+        "video_name": None,
+        # Phase 4 (comparison)
+        "video_path_b": None,
+        "video_name_b": None,
+        "is_analyzed_b": False,
+        "all_landmarks_b": {},
+        "all_angles_b": {},
+        "wrist_speeds_b": [],
+        "swings_b": [],
+        "phases_b": [],
+        "evaluation_b": None,
+        "pitches_b": [],
+        "pitching_phases_b": [],
+        "pitching_evaluation_b": None,
+        "release_info_b": None,
+        "arm_slot_b": None,
+        "compare_frame": 0,
+        "frame_mapping": [],
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+init_session()
+
+
+# ─── サイドバー ───
+st.sidebar.markdown("## ⚾ 少年野球フォーム分析")
+st.sidebar.markdown("---")
+
+app_mode = st.sidebar.radio(
+    "アプリモード",
+    ["通常分析", "2動画比較"],
+    help="通常分析 or 2動画を並べて比較",
+)
+
+st.sidebar.markdown("---")
+
+uploaded = st.sidebar.file_uploader(
+    "動画A をアップロード" if app_mode == "2動画比較" else "動画をアップロード",
+    type=["mp4", "mov", "avi", "mkv"],
+    help="スマホで撮影した動画ファイルを選択してください",
+    key="upload_a",
+)
+
+if uploaded:
+    if st.session_state.video_name != uploaded.name:
+        video_path = save_uploaded_video(uploaded)
+        st.session_state.video_path = video_path
+        st.session_state.video_name = uploaded.name
+        st.session_state.is_analyzed = False
+        st.session_state.all_landmarks = {}
+        st.session_state.all_angles = {}
+        st.session_state.cog_history = []
+        st.session_state.rotation_history = []
+        st.session_state.wrist_speeds = []
+        st.session_state.swings = []
+        st.session_state.phases = []
+        st.session_state.evaluation = None
+        st.session_state.weight_data = []
+        st.session_state.checkpoints = []
+        st.session_state.pitches = []
+        st.session_state.pitching_phases = []
+        st.session_state.pitching_evaluation = None
+        st.session_state.release_info = None
+        st.session_state.arm_slot = None
+        st.session_state.current_frame = 0
+
+# 動画Bアップロード（比較モード時）
+if app_mode == "2動画比較":
+    uploaded_b = st.sidebar.file_uploader(
+        "動画B をアップロード",
+        type=["mp4", "mov", "avi", "mkv"],
+        help="比較対象の動画を選択してください",
+        key="upload_b",
+    )
+    if uploaded_b:
+        if st.session_state.video_name_b != uploaded_b.name:
+            video_path_b = save_uploaded_video(uploaded_b)
+            st.session_state.video_path_b = video_path_b
+            st.session_state.video_name_b = uploaded_b.name
+            st.session_state.is_analyzed_b = False
+            st.session_state.all_landmarks_b = {}
+            st.session_state.all_angles_b = {}
+            st.session_state.wrist_speeds_b = []
+            st.session_state.swings_b = []
+            st.session_state.phases_b = []
+            st.session_state.evaluation_b = None
+            st.session_state.pitches_b = []
+            st.session_state.pitching_phases_b = []
+            st.session_state.pitching_evaluation_b = None
+            st.session_state.release_info_b = None
+            st.session_state.arm_slot_b = None
+            st.session_state.compare_frame = 0
+            st.session_state.frame_mapping = []
+
+st.sidebar.markdown("---")
+
+mode = st.sidebar.radio(
+    "分析モード",
+    ["バッティング", "ピッチング"],
+    help="分析したいフォームの種類を選択",
+)
+angle_defs = BATTING_ANGLES if mode == "バッティング" else PITCHING_ANGLES
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 設定")
+detection_conf = st.sidebar.slider("検出精度", 0.3, 1.0, 0.5, 0.1)
+show_skeleton = st.sidebar.checkbox("骨格を表示", value=True)
+show_angles_on_video = st.sidebar.checkbox("角度を動画上に表示", value=True)
+
+if mode == "ピッチング":
+    st.sidebar.markdown("### ピッチング設定")
+    throwing_arm = st.sidebar.radio("投げ腕", ["右投げ", "左投げ"])
+    st.session_state.throwing_arm = "right" if throwing_arm == "右投げ" else "left"
+
+st.sidebar.markdown("### 軌跡表示")
+show_wrist_trail = st.sidebar.checkbox("手首の軌跡", value=True)
+if mode == "バッティング":
+    show_bat_path = st.sidebar.checkbox("バット軌道（推定）", value=False)
+else:
+    show_bat_path = False
+show_phase_banner = st.sidebar.checkbox("フェーズ表示", value=True)
+
+
+# ─── メインエリア ───
+st.markdown('<div class="main-header">⚾ 少年野球フォーム分析ツール</div>', unsafe_allow_html=True)
+st.caption(f"モード: {mode} ｜ v4.0 バッティング＆ピッチング分析・比較・怪我予防チェック")
+
+if app_mode == "2動画比較":
+    # ═══════════════════════════════════════════════
+    # 2動画比較モード
+    # ═══════════════════════════════════════════════
+    if st.session_state.video_path is None or st.session_state.video_path_b is None:
+        st.info("👈 サイドバーから動画A・動画Bの両方をアップロードしてください")
+        st.markdown("""
+        ### 2動画比較の使い方
+        1. サイドバーで**分析モード**（バッティング/ピッチング）を選択
+        2. **動画A**（過去の動画・お手本）をアップロード
+        3. **動画B**（現在の動画・自分の動画）をアップロード
+        4. 「比較分析開始」ボタンを押す
+        5. インパクト/リリースで自動フレーム同期
+        """)
+        st.stop()
+
+    # 両動画を読み込み
+    try:
+        reader_a = VideoReader(st.session_state.video_path)
+        reader_b = VideoReader(st.session_state.video_path_b)
+    except Exception as e:
+        st.error(f"動画の読み込みに失敗: {e}")
+        st.stop()
+
+    st.sidebar.markdown("### 動画A情報")
+    st.sidebar.text(f"解像度: {reader_a.width}x{reader_a.height}")
+    st.sidebar.text(f"FPS: {reader_a.fps:.1f} / フレーム: {reader_a.total_frames}")
+    st.sidebar.markdown("### 動画B情報")
+    st.sidebar.text(f"解像度: {reader_b.width}x{reader_b.height}")
+    st.sidebar.text(f"FPS: {reader_b.fps:.1f} / フレーム: {reader_b.total_frames}")
+
+    # ── 分析実行 ──
+    needs_analysis = not st.session_state.is_analyzed or not st.session_state.is_analyzed_b
+    if needs_analysis:
+        if st.button("🔍 比較分析開始", type="primary", use_container_width=True):
+            detector = PoseDetector(min_detection_confidence=detection_conf)
+            angle_defs_comp = BATTING_ANGLES if mode == "バッティング" else PITCHING_ANGLES
+            arm = st.session_state.throwing_arm
+
+            # --- 動画A分析 ---
+            if not st.session_state.is_analyzed:
+                progress = st.progress(0, text="動画Aを分析中...")
+                all_lm_a = {}
+                all_ang_a = {}
+                for i, frame in reader_a.iter_frames():
+                    lm = detector.detect(frame)
+                    all_lm_a[i] = lm
+                    all_ang_a[i] = analyze_frame_angles(lm, angle_defs_comp, (reader_a.width, reader_a.height))
+                    if i % 5 == 0:
+                        progress.progress((i + 1) / reader_a.total_frames * 0.4, text=f"動画A骨格検出中... {i+1}/{reader_a.total_frames}")
+
+                ws_a = calc_wrist_speed(all_lm_a, reader_a.fps, wrist_idx=16)
+                sw_a = detect_swings(ws_a, reader_a.fps)
+                ev_a = None
+                ph_a = []
+                pi_a = []
+                p_ph_a = []
+                p_ev_a = None
+                rel_a = None
+                as_a = None
+
+                if mode == "バッティング" and sw_a:
+                    best = max(sw_a, key=lambda s: s[3])
+                    ph_a = detect_batting_phases(all_lm_a, ws_a, best, reader_a.fps)
+                    wd_a = calc_weight_shift(all_lm_a, best)
+                    ev_a = evaluate_batting(all_lm_a, best, wd_a)
+                elif mode == "ピッチング":
+                    arm_sp_a = calc_throwing_arm_speed(all_lm_a, reader_a.fps, arm=arm)
+                    ws_a = arm_sp_a
+                    pi_a = detect_pitch_motion(arm_sp_a, reader_a.fps)
+                    if pi_a:
+                        best_p = max(pi_a, key=lambda p: p[3])
+                        p_ph_a = detect_pitching_phases(all_lm_a, arm_sp_a, best_p, reader_a.fps, arm=arm)
+                        rel_a = detect_release_point(all_lm_a, best_p, reader_a.fps, arm=arm)
+                        as_a = calc_arm_slot(all_lm_a, best_p[2], arm=arm)
+                        p_ev_a = evaluate_pitching(all_lm_a, best_p, reader_a.fps, arm=arm)
+
+                st.session_state.all_landmarks = all_lm_a
+                st.session_state.all_angles = all_ang_a
+                st.session_state.wrist_speeds = ws_a
+                st.session_state.swings = sw_a
+                st.session_state.phases = ph_a
+                st.session_state.evaluation = ev_a
+                st.session_state.pitches = pi_a
+                st.session_state.pitching_phases = p_ph_a
+                st.session_state.pitching_evaluation = p_ev_a
+                st.session_state.release_info = rel_a
+                st.session_state.arm_slot = as_a
+                st.session_state.is_analyzed = True
+                progress.progress(0.45, text="動画A完了")
+
+            # --- 動画B分析 ---
+            if not st.session_state.is_analyzed_b:
+                progress_b = st.progress(0.45, text="動画Bを分析中...")
+                all_lm_b = {}
+                all_ang_b = {}
+                for i, frame in reader_b.iter_frames():
+                    lm = detector.detect(frame)
+                    all_lm_b[i] = lm
+                    all_ang_b[i] = analyze_frame_angles(lm, angle_defs_comp, (reader_b.width, reader_b.height))
+                    if i % 5 == 0:
+                        progress_b.progress(0.45 + (i + 1) / reader_b.total_frames * 0.4, text=f"動画B骨格検出中... {i+1}/{reader_b.total_frames}")
+
+                ws_b = calc_wrist_speed(all_lm_b, reader_b.fps, wrist_idx=16)
+                sw_b = detect_swings(ws_b, reader_b.fps)
+                ev_b = None
+                ph_b = []
+                pi_b = []
+                p_ph_b = []
+                p_ev_b = None
+                rel_b = None
+                as_b = None
+
+                if mode == "バッティング" and sw_b:
+                    best = max(sw_b, key=lambda s: s[3])
+                    ph_b = detect_batting_phases(all_lm_b, ws_b, best, reader_b.fps)
+                    wd_b = calc_weight_shift(all_lm_b, best)
+                    ev_b = evaluate_batting(all_lm_b, best, wd_b)
+                elif mode == "ピッチング":
+                    arm_sp_b = calc_throwing_arm_speed(all_lm_b, reader_b.fps, arm=arm)
+                    ws_b = arm_sp_b
+                    pi_b = detect_pitch_motion(arm_sp_b, reader_b.fps)
+                    if pi_b:
+                        best_p = max(pi_b, key=lambda p: p[3])
+                        p_ph_b = detect_pitching_phases(all_lm_b, arm_sp_b, best_p, reader_b.fps, arm=arm)
+                        rel_b = detect_release_point(all_lm_b, best_p, reader_b.fps, arm=arm)
+                        as_b = calc_arm_slot(all_lm_b, best_p[2], arm=arm)
+                        p_ev_b = evaluate_pitching(all_lm_b, best_p, reader_b.fps, arm=arm)
+
+                st.session_state.all_landmarks_b = all_lm_b
+                st.session_state.all_angles_b = all_ang_b
+                st.session_state.wrist_speeds_b = ws_b
+                st.session_state.swings_b = sw_b
+                st.session_state.phases_b = ph_b
+                st.session_state.evaluation_b = ev_b
+                st.session_state.pitches_b = pi_b
+                st.session_state.pitching_phases_b = p_ph_b
+                st.session_state.pitching_evaluation_b = p_ev_b
+                st.session_state.release_info_b = rel_b
+                st.session_state.arm_slot_b = as_b
+                st.session_state.is_analyzed_b = True
+                progress_b.progress(0.9, text="動画B完了")
+
+            detector.close()
+
+            # --- 初回フレーム同期（スイング/投球開始基準） ---
+            if mode == "バッティング":
+                sync_a, sync_b = find_sync_point_batting(
+                    st.session_state.swings, st.session_state.swings_b,
+                    sync_mode="swing_start")
+            else:
+                sync_a, sync_b = find_sync_point_pitching(
+                    st.session_state.pitches, st.session_state.pitches_b,
+                    sync_mode="pitch_start")
+
+            mapping = align_frames(reader_a.total_frames, reader_b.total_frames, sync_a, sync_b)
+            st.session_state.frame_mapping = mapping
+            st.session_state.compare_frame = 0
+            st.session_state.sync_a = sync_a
+            st.session_state.sync_b = sync_b
+
+            st.success("分析完了！")
+            st.rerun()
+        else:
+            # プレビュー
+            col_pa, col_pb = st.columns(2)
+            with col_pa:
+                fa = reader_a.get_frame(0)
+                if fa is not None:
+                    st.image(cv2.cvtColor(fa, cv2.COLOR_BGR2RGB), caption="動画A プレビュー", use_container_width=True)
+            with col_pb:
+                fb = reader_b.get_frame(0)
+                if fb is not None:
+                    st.image(cv2.cvtColor(fb, cv2.COLOR_BGR2RGB), caption="動画B プレビュー", use_container_width=True)
+            reader_a.close()
+            reader_b.close()
+            st.stop()
+
+    # ════════════════════════════════════════════════
+    # 比較結果表示
+    # ════════════════════════════════════════════════
+
+    # --- フレーム同期設定 ---
+    st.markdown("---")
+    st.markdown("### 🔄 フレーム同期設定")
+
+    sync_col1, sync_col2 = st.columns([1, 1])
+
+    with sync_col1:
+        if mode == "バッティング":
+            sync_options = {
+                "スイング開始": "swing_start",
+                "インパクト": "impact",
+                "スイング終了": "swing_end",
+            }
+        else:
+            sync_options = {
+                "投球開始": "pitch_start",
+                "リリース": "release",
+                "投球終了": "pitch_end",
+            }
+        sync_label = st.radio(
+            "同期基準",
+            list(sync_options.keys()),
+            help="2動画のどのタイミングを合わせるか選択",
+            key="sync_mode_radio",
+            horizontal=True,
+        )
+        sync_mode = sync_options[sync_label]
+
+    with sync_col2:
+        manual_offset = st.slider(
+            "手動オフセット（フレーム）",
+            -120, 120, 0,
+            help="＋で動画Bを遅らせる、ーで動画Bを早める",
+            key="manual_offset",
+        )
+
+    # 同期ポイント再計算
+    if mode == "バッティング":
+        sync_a, sync_b = find_sync_point_batting(
+            st.session_state.swings, st.session_state.swings_b,
+            sync_mode=sync_mode)
+    else:
+        sync_a, sync_b = find_sync_point_pitching(
+            st.session_state.pitches, st.session_state.pitches_b,
+            sync_mode=sync_mode)
+
+    # 手動オフセット適用
+    sync_b = sync_b + manual_offset
+
+    mapping = align_frames(reader_a.total_frames, reader_b.total_frames, sync_a, sync_b)
+
+    if not mapping:
+        mapping = [(i, i) for i in range(min(reader_a.total_frames, reader_b.total_frames))]
+
+    # 同期情報を表示
+    sync_info_col1, sync_info_col2, sync_info_col3 = st.columns(3)
+    with sync_info_col1:
+        st.caption(f"動画A 基準フレーム: F{sync_a}")
+    with sync_info_col2:
+        st.caption(f"動画B 基準フレーム: F{sync_b - manual_offset}" +
+                   (f" ({manual_offset:+d})" if manual_offset != 0 else ""))
+    with sync_info_col3:
+        st.caption(f"比較可能フレーム数: {len(mapping)}")
+
+    # --- スコア比較サマリー ---
+    eval_a = st.session_state.evaluation if mode == "バッティング" else st.session_state.pitching_evaluation
+    eval_b = st.session_state.evaluation_b if mode == "バッティング" else st.session_state.pitching_evaluation_b
+
+    comparison = compare_evaluations(eval_a, eval_b)
+
+    st.markdown("---")
+    st.markdown("### 📊 スコア比較")
+
+    if comparison:
+        sc_col1, sc_col2, sc_col3 = st.columns([1, 1, 2])
+
+        with sc_col1:
+            grade_a = comparison["grade_a"]
+            score_a = eval_a["total_score"]
+            st.markdown("**動画A（過去/お手本）**")
+            st.markdown(f'<div class="grade-{grade_a}" style="text-align:center;">{grade_a}</div>',
+                        unsafe_allow_html=True)
+            st.markdown(f"<div style='text-align:center; font-size:1.3rem;'><b>{score_a}</b>/100点</div>",
+                        unsafe_allow_html=True)
+
+        with sc_col2:
+            grade_b = comparison["grade_b"]
+            score_b = eval_b["total_score"]
+            st.markdown("**動画B（現在/自分）**")
+            st.markdown(f'<div class="grade-{grade_b}" style="text-align:center;">{grade_b}</div>',
+                        unsafe_allow_html=True)
+            st.markdown(f"<div style='text-align:center; font-size:1.3rem;'><b>{score_b}</b>/100点</div>",
+                        unsafe_allow_html=True)
+
+        with sc_col3:
+            change = comparison["score_change"]
+            if change > 0:
+                st.success(f"**+{change}点 UP!** スコアが向上しました")
+            elif change < 0:
+                st.warning(f"**{change}点** スコアが低下しています")
+            else:
+                st.info("スコア変化なし")
+
+            if comparison["improved"]:
+                st.markdown("**改善した項目:** " + ", ".join(comparison["improved"]))
+            if comparison["declined"]:
+                st.markdown("**低下した項目:** " + ", ".join(comparison["declined"]))
+
+            # 項目別スコア変化グラフ
+            fig_comp = go.Figure()
+            names = [d["name"] for d in comparison["detail_diffs"]]
+            scores_a_list = [d["score_a"] for d in comparison["detail_diffs"]]
+            scores_b_list = [d["score_b"] for d in comparison["detail_diffs"]]
+
+            fig_comp.add_trace(go.Bar(name="動画A", x=names, y=scores_a_list, marker_color="#FF9800"))
+            fig_comp.add_trace(go.Bar(name="動画B", x=names, y=scores_b_list, marker_color="#2196F3"))
+            fig_comp.update_layout(
+                barmode="group", height=250,
+                margin=dict(l=20, r=20, t=20, b=40),
+                template="plotly_dark",
+                legend=dict(orientation="h", y=1.1),
+            )
+            st.plotly_chart(fig_comp, use_container_width=True)
+    else:
+        st.info("評価データがありません。動画にスイング/投球動作が含まれているか確認してください。")
+
+    # --- 角度類似度 ---
+    if mapping:
+        frames_a_list = [m[0] for m in mapping]
+        frames_b_list = [m[1] for m in mapping]
+        similarity, per_angle = calc_angle_similarity(
+            st.session_state.all_angles, st.session_state.all_angles_b,
+            frames_a_list, frames_b_list)
+
+        if per_angle:
+            st.markdown("---")
+            st.markdown("### 🎯 フォーム類似度")
+            st.metric("総合類似度", f"{similarity * 100:.0f}%")
+
+            sim_cols = st.columns(len(per_angle))
+            for i, (name, sim) in enumerate(per_angle.items()):
+                with sim_cols[i % len(sim_cols)]:
+                    color = "#4CAF50" if sim > 0.8 else "#FF9800" if sim > 0.6 else "#F44336"
+                    st.markdown(f"**{name}**")
+                    st.progress(sim)
+
+    # --- 同期フレームビューア ---
+    st.markdown("---")
+    st.markdown("### 🎥 同期フレームビューア")
+
+    # ジャンプ要求があればスライダー作成前にキーへ反映
+    if "_cmp_jump_to" in st.session_state:
+        st.session_state.compare_slider = st.session_state._cmp_jump_to
+        del st.session_state._cmp_jump_to
+
+    compare_idx = st.slider(
+        "比較フレーム",
+        0, len(mapping) - 1,
+        st.session_state.compare_frame,
+        key="compare_slider",
+    )
+    st.session_state.compare_frame = compare_idx
+
+    frame_a_idx, frame_b_idx = mapping[compare_idx]
+
+    # コマ送りボタン
+    cmp_btn_cols = st.columns(5)
+    with cmp_btn_cols[0]:
+        if st.button("⏮ -10", key="cmp_bk10"):
+            st.session_state._cmp_jump_to = max(0, compare_idx - 10)
+            st.rerun()
+    with cmp_btn_cols[1]:
+        if st.button("◀ -1", key="cmp_bk1"):
+            st.session_state._cmp_jump_to = max(0, compare_idx - 1)
+            st.rerun()
+    with cmp_btn_cols[2]:
+        st.markdown(f"**A:F{frame_a_idx} / B:F{frame_b_idx}**")
+    with cmp_btn_cols[3]:
+        if st.button("+1 ▶", key="cmp_fw1"):
+            st.session_state._cmp_jump_to = min(len(mapping) - 1, compare_idx + 1)
+            st.rerun()
+    with cmp_btn_cols[4]:
+        if st.button("+10 ⏭", key="cmp_fw10"):
+            st.session_state._cmp_jump_to = min(len(mapping) - 1, compare_idx + 10)
+            st.rerun()
+
+    # 並べて表示
+    col_va, col_vb = st.columns(2)
+
+    with col_va:
+        st.markdown("**動画A**")
+        fa = reader_a.get_frame(frame_a_idx)
+        if fa is not None:
+            lm_a = st.session_state.all_landmarks.get(frame_a_idx)
+            if show_skeleton and lm_a:
+                det = PoseDetector(min_detection_confidence=detection_conf)
+                fa = det.draw_skeleton(fa, lm_a, angle_defs if show_angles_on_video else None)
+                det.close()
+            if show_wrist_trail:
+                fa = draw_wrist_trajectory(fa, st.session_state.all_landmarks, frame_a_idx, trail_length=40)
+            st.image(cv2.cvtColor(fa, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+    with col_vb:
+        st.markdown("**動画B**")
+        fb = reader_b.get_frame(frame_b_idx)
+        if fb is not None:
+            lm_b = st.session_state.all_landmarks_b.get(frame_b_idx)
+            if show_skeleton and lm_b:
+                det = PoseDetector(min_detection_confidence=detection_conf)
+                fb = det.draw_skeleton(fb, lm_b, angle_defs if show_angles_on_video else None)
+                det.close()
+            if show_wrist_trail:
+                fb = draw_wrist_trajectory(fb, st.session_state.all_landmarks_b, frame_b_idx, trail_length=40)
+            st.image(cv2.cvtColor(fb, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+    # --- 角度比較テーブル ---
+    angle_diffs = compare_angles(
+        st.session_state.all_angles, st.session_state.all_angles_b,
+        frame_a_idx, frame_b_idx)
+
+    if angle_diffs:
+        st.markdown("#### 📐 現在フレームの角度比較")
+        diff_data = []
+        for d in angle_diffs:
+            va = f"{d['value_a']:.1f}" if d["value_a"] is not None else "-"
+            vb = f"{d['value_b']:.1f}" if d["value_b"] is not None else "-"
+            if d["diff"] is not None:
+                sign = "+" if d["diff"] > 0 else ""
+                diff_str = f"{sign}{d['diff']:.1f}"
+            else:
+                diff_str = "-"
+            status_icon = {"same": "=", "minor": "~", "major": "!!", "missing": "?"}
+            diff_data.append({
+                "角度": d["name"],
+                "動画A": va,
+                "動画B": vb,
+                "差分": diff_str,
+                "判定": status_icon.get(d["status"], ""),
+            })
+        st.dataframe(pd.DataFrame(diff_data), use_container_width=True, hide_index=True)
+
+    # --- 角度推移比較グラフ ---
+    if st.session_state.all_angles and st.session_state.all_angles_b:
+        st.markdown("---")
+        st.markdown("### 📈 角度推移の比較")
+
+        # 全角度名を収集
+        angle_names_set = set()
+        for angles in st.session_state.all_angles.values():
+            angle_names_set.update(angles.keys())
+        angle_names_list = sorted(angle_names_set)
+
+        if angle_names_list:
+            fig_angles = make_subplots(
+                rows=len(angle_names_list), cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.05,
+                subplot_titles=angle_names_list,
+            )
+
+            for row_i, aname in enumerate(angle_names_list, 1):
+                # 動画Aのデータ
+                vals_a = []
+                for fa_i, fb_i in mapping:
+                    v = st.session_state.all_angles.get(fa_i, {}).get(aname)
+                    vals_a.append(v)
+                # 動画Bのデータ
+                vals_b = []
+                for fa_i, fb_i in mapping:
+                    v = st.session_state.all_angles_b.get(fb_i, {}).get(aname)
+                    vals_b.append(v)
+
+                x_axis = list(range(len(mapping)))
+
+                fig_angles.add_trace(
+                    go.Scatter(x=x_axis, y=vals_a, mode="lines",
+                               name=f"A: {aname}", line=dict(color="#FF9800", width=2),
+                               showlegend=(row_i == 1)),
+                    row=row_i, col=1,
+                )
+                fig_angles.add_trace(
+                    go.Scatter(x=x_axis, y=vals_b, mode="lines",
+                               name=f"B: {aname}", line=dict(color="#2196F3", width=2),
+                               showlegend=(row_i == 1)),
+                    row=row_i, col=1,
+                )
+
+                # 現在位置
+                fig_angles.add_vline(
+                    x=compare_idx, line_dash="dash", line_color="white",
+                    line_width=1, row=row_i, col=1)
+
+            fig_angles.update_layout(
+                height=200 * len(angle_names_list),
+                margin=dict(l=40, r=20, t=40, b=40),
+                template="plotly_dark",
+                legend=dict(orientation="h", y=1.02),
+            )
+            fig_angles.update_xaxes(title_text="同期フレーム", row=len(angle_names_list), col=1)
+            st.plotly_chart(fig_angles, use_container_width=True)
+
+    # フッター（比較モード）
+    st.markdown("---")
+    st.caption("⚾ 少年野球フォーム分析ツール v4.0 ｜ 2動画比較モード")
+    reader_a.close()
+    reader_b.close()
+    st.stop()
+
+
+# ═══════════════════════════════════════════════
+# 通常分析モード（以下は従来通り）
+# ═══════════════════════════════════════════════
+
+if st.session_state.video_path is None:
+    st.info("👈 左のサイドバーから動画をアップロードしてください")
+    st.markdown("""
+    ### 使い方
+    1. スマホで**バッティング**または**ピッチング**の動画を撮影
+    2. サイドバーの「動画をアップロード」から動画ファイルを選択
+    3. 「分析開始」ボタンを押す
+    4. スライダーでコマ送り＆角度を確認
+
+    ### v4.0 機能
+    #### バッティング
+    - スイング自動検出 ＆ フェーズ分割
+    - バット軌道表示・総合評価（100点満点）
+
+    #### ピッチング
+    - 投球動作の自動検出 ＆ フェーズ分割
+    - **リリースポイント検出** ＆ アームスロット判定
+    - **肩・肘の負担チェック**（怪我予防）
+    - 体の開き・ストライド長の評価
+
+    #### 2動画比較（NEW!）
+    - 過去の自分 vs 今の自分
+    - お手本動画 vs 自分の動画
+    - **同期再生**（インパクト/リリースで自動フレーム合わせ）
+    - 角度差分・スコア変化の可視化
+
+    ### 撮影のコツ
+    - 全身が映るように（頭からつま先まで）
+    - 背景はなるべくシンプルに、スマホは**横向き固定**
+    - バッティング: **正面やや斜め前**から
+    - ピッチング: **三塁側（右投手）/ 一塁側（左投手）**から
+    """)
+    st.stop()
+
+# ─── 動画読み込み ───
+try:
+    reader = VideoReader(st.session_state.video_path)
+except Exception as e:
+    st.error(f"動画の読み込みに失敗: {e}")
+    st.stop()
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 動画情報")
+st.sidebar.text(f"解像度: {reader.width}x{reader.height}")
+st.sidebar.text(f"FPS: {reader.fps:.1f}")
+st.sidebar.text(f"フレーム数: {reader.total_frames}")
+st.sidebar.text(f"再生時間: {reader.duration_sec:.1f}秒")
+
+# ─── 分析実行 ───
+if not st.session_state.is_analyzed:
+    if st.button("🔍 分析開始", type="primary", use_container_width=True):
+        detector = PoseDetector(min_detection_confidence=detection_conf)
+
+        progress = st.progress(0, text="動画を分析中...")
+        all_landmarks = {}
+        all_angles = {}
+        cog_history = []
+        rotation_history = []
+
+        # Step 1: 骨格検出
+        for i, frame in reader.iter_frames():
+            landmarks = detector.detect(frame)
+            all_landmarks[i] = landmarks
+            angles = analyze_frame_angles(landmarks, angle_defs, (reader.width, reader.height))
+            all_angles[i] = angles
+            cog = calc_center_of_gravity(landmarks)
+            cog_history.append(cog)
+            rot = calc_body_rotation(landmarks)
+            rotation_history.append(rot)
+
+            if i % 5 == 0:
+                progress.progress(
+                    (i + 1) / reader.total_frames * 0.7,
+                    text=f"骨格検出中... {i+1}/{reader.total_frames}"
+                )
+
+        detector.close()
+
+        # Step 2: スイング検出 & フェーズ分割
+        progress.progress(0.75, text="スイングを検出中...")
+        wrist_speeds = calc_wrist_speed(all_landmarks, reader.fps, wrist_idx=16)
+        swings = detect_swings(wrist_speeds, reader.fps)
+
+        phases = []
+        evaluation = None
+        weight_data = []
+        checkpoints = []
+
+        # ─── ピッチング分析 or バッティング分析 ───
+        pitches = []
+        pitching_phases = []
+        pitching_evaluation = None
+        release_info = None
+        arm_slot_val = None
+
+        if mode == "バッティング" and swings:
+            best_swing = max(swings, key=lambda s: s[3])
+
+            progress.progress(0.85, text="フェーズを分析中...")
+            phases = detect_batting_phases(all_landmarks, wrist_speeds, best_swing, reader.fps)
+
+            progress.progress(0.90, text="体重移動を分析中...")
+            weight_data = calc_weight_shift(all_landmarks, best_swing)
+
+            progress.progress(0.93, text="チェックポイントを分析中...")
+            checkpoints = get_phase_checkpoints(all_landmarks, phases)
+
+            progress.progress(0.96, text="総合評価中...")
+            evaluation = evaluate_batting(all_landmarks, best_swing, weight_data)
+
+        elif mode == "ピッチング":
+            arm = st.session_state.throwing_arm
+            wrist_idx = 16 if arm == "right" else 15
+
+            progress.progress(0.75, text="投球動作を検出中...")
+            arm_speeds = calc_throwing_arm_speed(all_landmarks, reader.fps, arm=arm)
+            wrist_speeds = arm_speeds  # グラフ用に保存
+            pitches = detect_pitch_motion(arm_speeds, reader.fps)
+
+            if pitches:
+                best_pitch = max(pitches, key=lambda p: p[3])
+
+                progress.progress(0.82, text="投球フェーズを分析中...")
+                pitching_phases = detect_pitching_phases(
+                    all_landmarks, arm_speeds, best_pitch, reader.fps, arm=arm)
+
+                progress.progress(0.88, text="リリースポイントを検出中...")
+                release_info = detect_release_point(
+                    all_landmarks, best_pitch, reader.fps, arm=arm)
+                arm_slot_val = calc_arm_slot(
+                    all_landmarks, best_pitch[2], arm=arm)
+
+                progress.progress(0.93, text="肩・肘の安全性をチェック中...")
+                pitching_evaluation = evaluate_pitching(
+                    all_landmarks, best_pitch, reader.fps, arm=arm)
+
+        progress.progress(1.0, text="完了！")
+        progress.empty()
+
+        # セッションに保存
+        st.session_state.all_landmarks = all_landmarks
+        st.session_state.all_angles = all_angles
+        st.session_state.cog_history = cog_history
+        st.session_state.rotation_history = rotation_history
+        st.session_state.wrist_speeds = wrist_speeds
+        st.session_state.swings = swings
+        st.session_state.phases = phases
+        st.session_state.evaluation = evaluation
+        st.session_state.weight_data = weight_data
+        st.session_state.checkpoints = checkpoints
+        st.session_state.pitches = pitches
+        st.session_state.pitching_phases = pitching_phases
+        st.session_state.pitching_evaluation = pitching_evaluation
+        st.session_state.release_info = release_info
+        st.session_state.arm_slot = arm_slot_val
+        st.session_state.is_analyzed = True
+        st.rerun()
+    else:
+        preview_frame = reader.get_frame(0)
+        if preview_frame is not None:
+            preview_rgb = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
+            st.image(preview_rgb, caption="プレビュー（分析前）", use_container_width=True)
+        st.stop()
+
+
+# ════════════════════════════════════════════════
+# 分析結果表示
+# ════════════════════════════════════════════════
+
+swings = st.session_state.swings
+phases = st.session_state.phases
+evaluation = st.session_state.evaluation
+
+# ─── 総合評価カード（バッティングモード時） ───
+if mode == "バッティング" and evaluation:
+    st.markdown("---")
+
+    eval_col1, eval_col2, eval_col3 = st.columns([1, 2, 2])
+
+    with eval_col1:
+        grade = evaluation["grade"]
+        st.markdown(f'<div class="grade-{grade}" style="text-align:center;">{grade}</div>',
+                    unsafe_allow_html=True)
+        st.markdown(f"<div style='text-align:center; font-size:1.5rem;'>"
+                    f"<b>{evaluation['total_score']}</b>/100点</div>",
+                    unsafe_allow_html=True)
+
+    with eval_col2:
+        st.markdown("#### 評価詳細")
+        for d in evaluation["details"]:
+            icon = "✅" if d["status"] == "good" else "⚠️" if d["status"] == "warning" else "❌"
+            st.markdown(f"{icon} **{d['name']}** {d['score']}/{d['max']}")
+            st.progress(int(d["score"] / d["max"] * 100) / 100)
+
+    with eval_col3:
+        st.markdown("#### アドバイス")
+        st.info(evaluation["summary"])
+
+        # スイング情報
+        if swings:
+            best_swing = max(swings, key=lambda s: s[3])
+            metrics = calc_swing_metrics(st.session_state.all_landmarks, best_swing, reader.fps)
+            st.markdown("#### スイングデータ")
+            for k, v in metrics.items():
+                st.text(f"{k}: {v}")
+
+            arc = calc_swing_arc_angle(st.session_state.all_landmarks, best_swing)
+            if arc is not None:
+                if abs(arc) < 10:
+                    arc_type = "レベルスイング"
+                elif arc < 0:
+                    arc_type = "ダウンスイング"
+                else:
+                    arc_type = "アッパースイング"
+                st.text(f"スイング軌道: {arc_type} ({arc:+.1f}°)")
+
+elif mode == "バッティング" and not swings:
+    st.warning("スイングが検出されませんでした。動画にバッティングの動きが含まれているか確認してください。")
+
+
+# ─── ピッチング総合評価（ピッチングモード時） ───
+pitching_eval = st.session_state.pitching_evaluation
+pitching_phases = st.session_state.pitching_phases
+pitches = st.session_state.pitches
+
+if mode == "ピッチング" and pitching_eval:
+    st.markdown("---")
+
+    # 怪我リスクバナー
+    risk = pitching_eval["injury_risk"]
+    if risk == "high":
+        st.error("⚠️ **怪我リスク: 高** — フォーム改善を強く推奨します")
+    elif risk == "medium":
+        st.warning("⚠️ **怪我リスク: 中** — 肩・肘への負担にやや注意")
+    else:
+        st.success("✅ **怪我リスク: 低** — 安全なフォームです")
+
+    eval_col1, eval_col2, eval_col3 = st.columns([1, 2, 2])
+
+    with eval_col1:
+        grade = pitching_eval["grade"]
+        st.markdown(f'<div class="grade-{grade}" style="text-align:center;">{grade}</div>',
+                    unsafe_allow_html=True)
+        st.markdown(f"<div style='text-align:center; font-size:1.5rem;'>"
+                    f"<b>{pitching_eval['total_score']}</b>/100点</div>",
+                    unsafe_allow_html=True)
+
+    with eval_col2:
+        st.markdown("#### 評価詳細")
+        for d in pitching_eval["details"]:
+            icon = "✅" if d["status"] == "good" else "⚠️" if d["status"] == "warning" else "❌"
+            st.markdown(f"{icon} **{d['name']}** {d['score']}/{d['max']}")
+            st.progress(int(d["score"] / d["max"] * 100) / 100)
+
+    with eval_col3:
+        st.markdown("#### アドバイス")
+        st.info(pitching_eval["summary"])
+
+        # リリースポイント情報
+        rel = st.session_state.release_info
+        if rel:
+            st.markdown("#### リリースポイント")
+            st.text(f"フレーム: {rel['frame']}")
+            st.text(f"肘角度: {rel['elbow_angle']:.1f}°")
+            if rel["shoulder_angle"]:
+                st.text(f"肩角度: {rel['shoulder_angle']:.1f}°")
+            if rel["height_ratio"]:
+                st.text(f"リリース高さ: 身長の{rel['height_ratio']*100:.0f}%")
+
+        # アームスロット
+        arm_slot_val = st.session_state.arm_slot
+        if arm_slot_val is not None:
+            if arm_slot_val > 70:
+                slot_name = "オーバースロー"
+            elif arm_slot_val > 45:
+                slot_name = "スリークォーター"
+            elif arm_slot_val > 15:
+                slot_name = "サイドスロー"
+            else:
+                slot_name = "アンダースロー"
+            st.text(f"アームスロット: {slot_name} ({arm_slot_val:.0f}°)")
+
+    # 怪我リスク詳細
+    if pitching_eval["injury_warnings"]:
+        st.markdown("---")
+        st.markdown("### ⚠️ 怪我リスク詳細")
+        for warn in pitching_eval["injury_warnings"]:
+            st.markdown(f"- {warn}")
+
+    # 評価サブ詳細
+    with st.expander("📋 各項目の詳細チェック結果"):
+        for d in pitching_eval["details"]:
+            st.markdown(f"**{d['name']}** ({d['score']}/{d['max']})")
+            for sd in d.get("sub_details", []):
+                st.markdown(f"  - {sd}")
+            st.markdown("")
+
+    # 肘角度推移グラフ
+    elbow_angles = pitching_eval.get("elbow_angles", [])
+    if elbow_angles:
+        st.markdown("---")
+        st.markdown("### 💪 肘角度の推移（怪我予防チェック）")
+
+        ea_frames = [a[0] for a in elbow_angles]
+        ea_values = [a[1] for a in elbow_angles]
+        ea_times = [f / reader.fps for f in ea_frames] if reader.fps > 0 else ea_frames
+
+        fig_elbow = go.Figure()
+        fig_elbow.add_trace(go.Scatter(
+            x=ea_times, y=ea_values, mode="lines",
+            name="肘角度", line=dict(color="#FF5722", width=2),
+        ))
+
+        # 安全ゾーン
+        fig_elbow.add_hrect(y0=140, y1=180,
+                            fillcolor="rgba(76,175,80,0.15)", line_width=0,
+                            annotation_text="安全", annotation_position="right")
+        fig_elbow.add_hrect(y0=120, y1=140,
+                            fillcolor="rgba(255,193,7,0.15)", line_width=0,
+                            annotation_text="注意", annotation_position="right")
+        fig_elbow.add_hrect(y0=0, y1=120,
+                            fillcolor="rgba(244,67,54,0.15)", line_width=0,
+                            annotation_text="危険", annotation_position="right")
+
+        # リリースポイント
+        if rel:
+            rel_time = rel["frame"] / reader.fps if reader.fps > 0 else rel["frame"]
+            fig_elbow.add_vline(x=rel_time, line_dash="dash", line_color="cyan",
+                                annotation_text="リリース")
+
+        fig_elbow.update_layout(
+            xaxis_title="時間（秒）", yaxis_title="肘角度（度）",
+            height=300, template="plotly_dark",
+            margin=dict(l=40, r=80, t=30, b=40),
+        )
+        st.plotly_chart(fig_elbow, use_container_width=True)
+
+elif mode == "ピッチング" and not pitches:
+    st.warning("投球動作が検出されませんでした。動画にピッチングの動きが含まれているか確認してください。")
+
+
+# ─── フェーズタイムライン ───
+# バッティングフェーズ
+if mode == "バッティング" and phases:
+    st.markdown("---")
+    st.markdown("### 🔄 バッティングフェーズ")
+
+    phase_cols = st.columns(len(phases))
+    for i, (key, p_start, p_end) in enumerate(phases):
+        info = BATTING_PHASES[key]
+        with phase_cols[i]:
+            st.markdown(
+                f'<div class="phase-badge" style="background:{info["color"]};">'
+                f'{info["emoji"]} {info["name"]}</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption(f"F{p_start}-{p_end}")
+            if st.button(f"▶ {info['name']}", key=f"phase_{key}"):
+                st.session_state._jump_to = p_start
+                st.rerun()
+
+# ピッチングフェーズ
+if mode == "ピッチング" and pitching_phases:
+    st.markdown("---")
+    st.markdown("### 🔄 ピッチングフェーズ")
+
+    phase_cols = st.columns(len(pitching_phases))
+    for i, (key, p_start, p_end) in enumerate(pitching_phases):
+        info = PITCHING_PHASE_DEFS[key]
+        with phase_cols[i]:
+            st.markdown(
+                f'<div class="phase-badge" style="background:{info["color"]};">'
+                f'{info["emoji"]} {info["name"]}</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption(f"F{p_start}-{p_end}")
+            if st.button(f"▶ {info['name']}", key=f"pphase_{key}"):
+                st.session_state._jump_to = p_start
+                st.rerun()
+
+
+# ─── チェックポイント（バッティング） ───
+if mode == "バッティング" and st.session_state.checkpoints:
+    st.markdown("---")
+    st.markdown("### ✅ フェーズ別チェックポイント")
+
+    for cp in st.session_state.checkpoints:
+        with st.expander(f"{BATTING_PHASES[cp['phase']]['emoji']} {cp['phase_name']}（フレーム {cp['frame']}）"):
+            for check in cp["checks"]:
+                icon = "✅" if check["status"] == "good" else "⚠️" if check["status"] == "warning" else "ℹ️"
+                css_class = f"check-{check['status']}"
+                st.markdown(
+                    f'{icon} <span class="{css_class}"><b>{check["item"]}: {check["value"]}</b></span>'
+                    f' — {check["advice"]}',
+                    unsafe_allow_html=True,
+                )
+
+
+# ─── 動画ビューア ───
+st.markdown("---")
+st.markdown("### 🎥 フレームビューア")
+
+# ジャンプ要求があればスライダー作成前にキーへ反映
+if "_jump_to" in st.session_state:
+    st.session_state.frame_slider = st.session_state._jump_to
+    del st.session_state._jump_to
+
+col_slider, col_info = st.columns([4, 1])
+with col_slider:
+    frame_idx = st.slider(
+        "フレーム",
+        0, reader.total_frames - 1,
+        st.session_state.current_frame,
+        key="frame_slider",
+    )
+    st.session_state.current_frame = frame_idx
+
+with col_info:
+    time_sec = frame_idx / reader.fps if reader.fps > 0 else 0
+    st.metric("時間", f"{time_sec:.2f}秒")
+
+# コマ送りボタン
+btn_cols = st.columns(5)
+with btn_cols[0]:
+    if st.button("⏮ -10"):
+        st.session_state._jump_to = max(0, frame_idx - 10)
+        st.rerun()
+with btn_cols[1]:
+    if st.button("◀ -1"):
+        st.session_state._jump_to = max(0, frame_idx - 1)
+        st.rerun()
+with btn_cols[2]:
+    st.markdown(f"**{frame_idx} / {reader.total_frames - 1}**")
+with btn_cols[3]:
+    if st.button("+1 ▶"):
+        st.session_state._jump_to = min(reader.total_frames - 1, frame_idx + 1)
+        st.rerun()
+with btn_cols[4]:
+    if st.button("+10 ⏭"):
+        st.session_state._jump_to = min(reader.total_frames - 1, frame_idx + 10)
+        st.rerun()
+
+# スイング/投球 区間へのジャンプボタン
+if mode == "ピッチング" and pitches:
+    pitch_cols = st.columns(len(pitches) + 1)
+    with pitch_cols[0]:
+        st.markdown("**投球:**")
+    for i, (p_start, p_end, p_release, p_speed) in enumerate(pitches):
+        with pitch_cols[i + 1]:
+            if st.button(f"⚾ #{i+1} (F{p_start}-{p_end})", key=f"pitch_jump_{i}"):
+                st.session_state._jump_to = p_start
+                st.rerun()
+
+if mode == "バッティング" and swings:
+    swing_cols = st.columns(len(swings) + 1)
+    with swing_cols[0]:
+        st.markdown("**スイング:**")
+    for i, (s_start, s_end, s_peak, s_speed) in enumerate(swings):
+        with swing_cols[i + 1]:
+            if st.button(f"⚾ #{i+1} (F{s_start}-{s_end})", key=f"swing_jump_{i}"):
+                st.session_state._jump_to = s_start
+                st.rerun()
+
+
+# ─── 動画フレーム＋骨格表示 ───
+col_video, col_angles = st.columns([3, 1])
+
+with col_video:
+    frame = reader.get_frame(frame_idx)
+    if frame is not None:
+        landmarks = st.session_state.all_landmarks.get(frame_idx)
+
+        # 骨格描画
+        if show_skeleton and landmarks:
+            detector = PoseDetector(min_detection_confidence=detection_conf)
+            angles_to_show = angle_defs if show_angles_on_video else None
+            frame = detector.draw_skeleton(frame, landmarks, angles_to_show)
+            detector.close()
+
+        # 手首の軌跡
+        if show_wrist_trail:
+            frame = draw_wrist_trajectory(
+                frame, st.session_state.all_landmarks, frame_idx,
+                trail_length=40,
+            )
+
+        # バット軌道
+        if show_bat_path:
+            frame = draw_bat_path(
+                frame, st.session_state.all_landmarks, frame_idx,
+                trail_length=30,
+            )
+
+        # フェーズ表示バナー
+        active_phases = phases if mode == "バッティング" else pitching_phases
+        active_phase_defs = BATTING_PHASES if mode == "バッティング" else PITCHING_PHASE_DEFS
+        phase_lookup_fn = get_phase_at_frame if mode == "バッティング" else get_pitching_phase_at_frame
+
+        if show_phase_banner and active_phases:
+            phase_key, phase_info = phase_lookup_fn(active_phases, frame_idx)
+            if phase_key and phase_info:
+                progress_ratio = 0
+                for pk, ps, pe in active_phases:
+                    if pk == phase_key:
+                        progress_ratio = (frame_idx - ps) / max(1, pe - ps)
+                        break
+                frame = draw_phase_indicator(frame, phase_key, phase_info, progress_ratio)
+
+        # リリースポイントマーカー（ピッチング時）
+        if mode == "ピッチング" and st.session_state.release_info:
+            rel = st.session_state.release_info
+            if frame_idx == rel["frame"]:
+                h_f, w_f = frame.shape[:2]
+                rx, ry = int(rel["position"][0] * w_f), int(rel["position"][1] * h_f)
+                cv2.circle(frame, (rx, ry), 12, (0, 0, 255), 3, cv2.LINE_AA)
+                cv2.putText(frame, "RELEASE", (rx + 15, ry - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        st.image(frame_rgb, use_container_width=True)
+
+with col_angles:
+    # フェーズ表示
+    if mode == "バッティング" and phases:
+        phase_key, phase_info = get_phase_at_frame(phases, frame_idx)
+        if phase_key and phase_info:
+            st.markdown(
+                f'<div class="phase-badge" style="background:{phase_info["color"]};">'
+                f'{phase_info["emoji"]} {phase_info["name"]}</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("")
+    elif mode == "ピッチング" and pitching_phases:
+        phase_key, phase_info = get_pitching_phase_at_frame(pitching_phases, frame_idx)
+        if phase_key and phase_info:
+            st.markdown(
+                f'<div class="phase-badge" style="background:{phase_info["color"]};">'
+                f'{phase_info["emoji"]} {phase_info["name"]}</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("")
+
+    st.markdown("#### 📐 現在の角度")
+    angles = st.session_state.all_angles.get(frame_idx, {})
+    if angles:
+        for name, value in angles.items():
+            st.metric(name, f"{value:.1f}°")
+    else:
+        st.caption("検出なし")
+
+    rot = st.session_state.rotation_history[frame_idx] if frame_idx < len(st.session_state.rotation_history) else None
+    if rot is not None:
+        st.metric("肩の開き", f"{rot:.1f}°")
+
+    # バッティング: スイング内かどうか
+    if mode == "バッティング":
+        for s_start, s_end, s_peak, _ in swings:
+            if s_start <= frame_idx <= s_end:
+                st.success("⚾ スイング中")
+                if frame_idx == s_peak:
+                    st.markdown("**💥 インパクト！**")
+                break
+
+    # ピッチング: 投球内かどうか
+    if mode == "ピッチング":
+        for p_start, p_end, p_release, _ in pitches:
+            if p_start <= frame_idx <= p_end:
+                st.success("⚾ 投球動作中")
+                if frame_idx == p_release:
+                    st.markdown("**🎯 リリース！**")
+                break
+
+
+# ─── 手首速度グラフ ───
+if st.session_state.wrist_speeds:
+    st.markdown("---")
+    st.markdown("### 🏃 手首速度 ＆ 角度推移")
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        row_heights=[0.4, 0.6],
+        vertical_spacing=0.08,
+        subplot_titles=("手首速度", "角度推移"),
+    )
+
+    # 手首速度
+    speed_frames = [f for f, _ in st.session_state.wrist_speeds]
+    speed_values = [s for _, s in st.session_state.wrist_speeds]
+    speed_times = [f / reader.fps for f in speed_frames] if reader.fps > 0 else speed_frames
+
+    fig.add_trace(
+        go.Scatter(x=speed_times, y=speed_values, mode="lines",
+                   name="手首速度", line=dict(color="#FF5722", width=2)),
+        row=1, col=1,
+    )
+
+    # スイング区間をハイライト
+    for s_start, s_end, s_peak, _ in swings:
+        t_start = s_start / reader.fps if reader.fps > 0 else s_start
+        t_end = s_end / reader.fps if reader.fps > 0 else s_end
+        fig.add_vrect(
+            x0=t_start, x1=t_end,
+            fillcolor="rgba(255,87,34,0.15)",
+            line_width=0,
+            row=1, col=1,
+        )
+
+    # フェーズをハイライト
+    display_phases = phases if mode == "バッティング" else pitching_phases
+    display_phase_defs = BATTING_PHASES if mode == "バッティング" else PITCHING_PHASE_DEFS
+    for phase_key, p_start, p_end in display_phases:
+        info = display_phase_defs[phase_key]
+        t_start = p_start / reader.fps if reader.fps > 0 else p_start
+        t_end = p_end / reader.fps if reader.fps > 0 else p_end
+        hex_color = info["color"].lstrip("#")
+        r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+        fig.add_vrect(
+            x0=t_start, x1=t_end,
+            fillcolor=f"rgba({r},{g},{b},0.1)",
+            line=dict(color=info["color"], width=1),
+            row=1, col=1,
+            annotation_text=info["name"],
+            annotation_position="top left",
+            annotation_font_size=10,
+        )
+
+    # 角度推移
+    angle_data = []
+    for i in range(reader.total_frames):
+        fa = st.session_state.all_angles.get(i, {})
+        row_data = {"time": i / reader.fps if reader.fps > 0 else i}
+        row_data.update(fa)
+        angle_data.append(row_data)
+
+    df = pd.DataFrame(angle_data)
+    angle_names = [c for c in df.columns if c != "time"]
+    colors = ["#1E88E5", "#F44336", "#4CAF50", "#FFC107", "#9C27B0", "#FF5722"]
+
+    for i, name in enumerate(angle_names):
+        fig.add_trace(
+            go.Scatter(x=df["time"], y=df[name], mode="lines",
+                       name=name, line=dict(color=colors[i % len(colors)], width=2)),
+            row=2, col=1,
+        )
+
+    # 現在位置
+    current_time = frame_idx / reader.fps if reader.fps > 0 else frame_idx
+    for row in [1, 2]:
+        fig.add_vline(
+            x=current_time, line_dash="dash", line_color="white",
+            line_width=2, row=row, col=1,
+        )
+
+    fig.update_layout(
+        height=550,
+        margin=dict(l=40, r=20, t=40, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        template="plotly_dark",
+    )
+    fig.update_yaxes(title_text="速度", row=1, col=1)
+    fig.update_yaxes(title_text="角度（度）", row=2, col=1)
+    fig.update_xaxes(title_text="時間（秒）", row=2, col=1)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ─── 体重移動グラフ ───
+weight_data = st.session_state.weight_data
+if weight_data:
+    st.markdown("---")
+    st.markdown("### ⚖️ 体重移動")
+
+    fig_weight = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=("重心位置 (左右)", "体重配分"),
+        column_widths=[0.5, 0.5],
+    )
+
+    w_frames = [d[0] for d in weight_data]
+    w_times = [f / reader.fps for f in w_frames] if reader.fps > 0 else w_frames
+    w_cog_x = [d[1] for d in weight_data]
+    w_ratio = [d[2] for d in weight_data]
+
+    fig_weight.add_trace(
+        go.Scatter(x=w_times, y=w_cog_x, mode="lines+markers",
+                   marker=dict(size=4), name="重心X", line=dict(color="#2196F3")),
+        row=1, col=1,
+    )
+
+    fig_weight.add_trace(
+        go.Scatter(x=w_times, y=w_ratio, mode="lines+markers",
+                   marker=dict(size=4), name="体重配分", line=dict(color="#FF9800"),
+                   fill="tozeroy", fillcolor="rgba(255,152,0,0.2)"),
+        row=1, col=2,
+    )
+
+    fig_weight.add_hline(y=0.5, line_dash="dash", line_color="gray", row=1, col=2,
+                         annotation_text="中央")
+
+    fig_weight.update_layout(
+        height=300,
+        margin=dict(l=40, r=20, t=40, b=40),
+        template="plotly_dark",
+    )
+    fig_weight.update_yaxes(title_text="位置", row=1, col=1)
+    fig_weight.update_yaxes(title_text="前足←→後ろ足", range=[0, 1], row=1, col=2)
+
+    st.plotly_chart(fig_weight, use_container_width=True)
+
+
+# ─── 重心移動（2D） ───
+if any(c is not None for c in st.session_state.cog_history):
+    st.markdown("### 📍 重心軌跡")
+    cog_x = [c[0] if c else None for c in st.session_state.cog_history]
+    cog_y = [c[1] if c else None for c in st.session_state.cog_history]
+
+    fig_cog = go.Figure()
+    fig_cog.add_trace(go.Scatter(
+        x=cog_x, y=cog_y, mode="markers+lines",
+        marker=dict(size=4, color=list(range(len(cog_x))),
+                    colorscale="Viridis", showscale=True,
+                    colorbar=dict(title="フレーム")),
+        line=dict(color="rgba(255,255,255,0.3)", width=1),
+        name="重心",
+    ))
+
+    if frame_idx < len(cog_x) and cog_x[frame_idx] is not None:
+        fig_cog.add_trace(go.Scatter(
+            x=[cog_x[frame_idx]], y=[cog_y[frame_idx]],
+            mode="markers", marker=dict(size=15, color="red", symbol="x"),
+            name="現在",
+        ))
+
+    fig_cog.update_layout(
+        xaxis_title="左右", yaxis_title="上下",
+        yaxis=dict(autorange="reversed"),
+        height=300, margin=dict(l=40, r=20, t=30, b=40),
+        template="plotly_dark",
+    )
+    st.plotly_chart(fig_cog, use_container_width=True)
+
+
+# ─── フッター ───
+st.markdown("---")
+st.caption("⚾ 少年野球フォーム分析ツール v4.0 ｜ MediaPipe Pose + OpenCV + Streamlit")
+
+reader.close()
