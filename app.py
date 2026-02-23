@@ -1112,16 +1112,12 @@ with col_video:
                 trail_length=30,
             )
 
-        # フェーズ表示バナー
-        active_phases = phases if mode == "バッティング" else pitching_phases
-        active_phase_defs = BATTING_PHASES if mode == "バッティング" else PITCHING_PHASE_DEFS
-        phase_lookup_fn = get_phase_at_frame if mode == "バッティング" else get_pitching_phase_at_frame
-
-        if show_phase_banner and active_phases:
-            phase_key, phase_info = phase_lookup_fn(active_phases, frame_idx)
+        # フェーズ表示バナー（ピッチング時のみ）
+        if show_phase_banner and mode == "ピッチング" and pitching_phases:
+            phase_key, phase_info = get_pitching_phase_at_frame(pitching_phases, frame_idx)
             if phase_key and phase_info:
                 progress_ratio = 0
-                for pk, ps, pe in active_phases:
+                for pk, ps, pe in pitching_phases:
                     if pk == phase_key:
                         progress_ratio = (frame_idx - ps) / max(1, pe - ps)
                         break
