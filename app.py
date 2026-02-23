@@ -30,7 +30,8 @@ from src.pitching_detector import (
 from src.pitching_evaluator import evaluate_pitching
 from src.comparison import (
     align_frames, compare_angles,
-    create_side_by_side, find_sync_point_batting, find_sync_point_pitching,
+    create_side_by_side, create_top_bottom,
+    find_sync_point_batting, find_sync_point_pitching,
 )
 from utils.video_utils import VideoReader, save_uploaded_video
 
@@ -598,7 +599,12 @@ if app_mode == "2動画比較":
             fb = draw_wrist_trajectory(fb, st.session_state.all_landmarks_b, frame_b_idx, trail_length=40)
         cv2.putText(fb, "B", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 160, 0), 3, cv2.LINE_AA)
 
-    combined = create_side_by_side(fa, fb)
+    # 両方縦向き → 横並び、それ以外 → 縦並び
+    both_portrait = (reader_a.height > reader_a.width) and (reader_b.height > reader_b.width)
+    if both_portrait:
+        combined = create_side_by_side(fa, fb)
+    else:
+        combined = create_top_bottom(fa, fb)
     st.image(cv2.cvtColor(combined, cv2.COLOR_BGR2RGB), use_container_width=True)
 
     # --- 角度比較テーブル ---

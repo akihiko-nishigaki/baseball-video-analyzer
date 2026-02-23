@@ -186,6 +186,42 @@ def create_side_by_side(frame_a, frame_b, target_height=480):
     return combined
 
 
+def create_top_bottom(frame_a, frame_b, target_width=640):
+    """2フレームを縦並びにした画像を作成
+
+    Args:
+        frame_a: 動画Aのフレーム（BGR）
+        frame_b: 動画Bのフレーム（BGR）
+        target_width: 出力画像の幅
+
+    Returns:
+        combined: 縦並びの画像（BGR）
+    """
+    if frame_a is None and frame_b is None:
+        return np.zeros((target_width, target_width, 3), dtype=np.uint8)
+
+    if frame_a is None:
+        frame_a = np.zeros_like(frame_b)
+    if frame_b is None:
+        frame_b = np.zeros_like(frame_a)
+
+    # 幅を揃える
+    ha, wa = frame_a.shape[:2]
+    hb, wb = frame_b.shape[:2]
+
+    scale_a = target_width / wa
+    scale_b = target_width / wb
+
+    resized_a = cv2.resize(frame_a, (target_width, int(ha * scale_a)))
+    resized_b = cv2.resize(frame_b, (target_width, int(hb * scale_b)))
+
+    # 区切り線
+    separator = np.full((4, target_width, 3), (100, 100, 100), dtype=np.uint8)
+
+    combined = np.vstack([resized_a, separator, resized_b])
+    return combined
+
+
 def draw_angle_diff_overlay(frame, landmarks, angle_diffs, side="A"):
     """角度差分を動画フレームに描画
 
