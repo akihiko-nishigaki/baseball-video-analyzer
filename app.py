@@ -29,9 +29,8 @@ from src.pitching_detector import (
 )
 from src.pitching_evaluator import evaluate_pitching
 from src.comparison import (
-    align_frames, compare_angles, compare_evaluations,
+    align_frames, compare_angles,
     create_side_by_side, find_sync_point_batting, find_sync_point_pitching,
-    calc_angle_similarity,
 )
 from utils.video_utils import VideoReader, save_uploaded_video
 
@@ -426,149 +425,74 @@ if app_mode == "2動画比較":
 
     # --- フレーム同期設定 ---
     st.markdown("---")
-    st.markdown("### 🔄 フレーム同期設定")
 
-    sync_col1, sync_col2 = st.columns([1, 1])
+    # スイング/投球が検出されているか確認
+    has_motion_a = bool(st.session_state.swings) if mode == "バッティング" else bool(st.session_state.pitches)
+    has_motion_b = bool(st.session_state.swings_b) if mode == "バッティング" else bool(st.session_state.pitches_b)
+    has_sync = has_motion_a and has_motion_b
 
-    with sync_col1:
-        if mode == "バッティング":
-            sync_options = {
-                "スイング開始": "swing_start",
-                "インパクト": "impact",
-                "スイング終了": "swing_end",
-            }
-        else:
-            sync_options = {
-                "投球開始": "pitch_start",
-                "リリース": "release",
-                "投球終了": "pitch_end",
-            }
-        sync_label = st.radio(
-            "同期基準",
-            list(sync_options.keys()),
-            help="2動画のどのタイミングを合わせるか選択",
-            key="sync_mode_radio",
-            horizontal=True,
-        )
-        sync_mode = sync_options[sync_label]
+    if has_sync:
+        st.markdown("### 🔄 フレーム同期設定")
+        sync_col1, sync_col2 = st.columns([1, 1])
 
-    with sync_col2:
-        manual_offset = st.slider(
-            "手動オフセット（フレーム）",
-            -120, 120, 0,
-            help="＋で動画Bを遅らせる、ーで動画Bを早める",
-            key="manual_offset",
-        )
-
-    # 同期ポイント再計算
-    if mode == "バッティング":
-        sync_a, sync_b = find_sync_point_batting(
-            st.session_state.swings, st.session_state.swings_b,
-            sync_mode=sync_mode)
-    else:
-        sync_a, sync_b = find_sync_point_pitching(
-            st.session_state.pitches, st.session_state.pitches_b,
-            sync_mode=sync_mode)
-
-    # 手動オフセット適用
-    sync_b = sync_b + manual_offset
-
-    mapping = align_frames(reader_a.total_frames, reader_b.total_frames, sync_a, sync_b)
-
-    if not mapping:
-        mapping = [(i, i) for i in range(min(reader_a.total_frames, reader_b.total_frames))]
-
-    # 同期情報を表示
-    sync_info_col1, sync_info_col2, sync_info_col3 = st.columns(3)
-    with sync_info_col1:
-        st.caption(f"動画A 基準フレーム: F{sync_a}")
-    with sync_info_col2:
-        st.caption(f"動画B 基準フレーム: F{sync_b - manual_offset}" +
-                   (f" ({manual_offset:+d})" if manual_offset != 0 else ""))
-    with sync_info_col3:
-        st.caption(f"比較可能フレーム数: {len(mapping)}")
-
-    # --- スコア比較サマリー ---
-    eval_a = st.session_state.evaluation if mode == "バッティング" else st.session_state.pitching_evaluation
-    eval_b = st.session_state.evaluation_b if mode == "バッティング" else st.session_state.pitching_evaluation_b
-
-    comparison = compare_evaluations(eval_a, eval_b)
-
-    st.markdown("---")
-    st.markdown("### 📊 スコア比較")
-
-    if comparison:
-        sc_col1, sc_col2, sc_col3 = st.columns([1, 1, 2])
-
-        with sc_col1:
-            grade_a = comparison["grade_a"]
-            score_a = eval_a["total_score"]
-            st.markdown("**動画A（過去/お手本）**")
-            st.markdown(f'<div class="grade-{grade_a}" style="text-align:center;">{grade_a}</div>',
-                        unsafe_allow_html=True)
-            st.markdown(f"<div style='text-align:center; font-size:1.3rem;'><b>{score_a}</b>/100点</div>",
-                        unsafe_allow_html=True)
-
-        with sc_col2:
-            grade_b = comparison["grade_b"]
-            score_b = eval_b["total_score"]
-            st.markdown("**動画B（現在/自分）**")
-            st.markdown(f'<div class="grade-{grade_b}" style="text-align:center;">{grade_b}</div>',
-                        unsafe_allow_html=True)
-            st.markdown(f"<div style='text-align:center; font-size:1.3rem;'><b>{score_b}</b>/100点</div>",
-                        unsafe_allow_html=True)
-
-        with sc_col3:
-            change = comparison["score_change"]
-            if change > 0:
-                st.success(f"**+{change}点 UP!** スコアが向上しました")
-            elif change < 0:
-                st.warning(f"**{change}点** スコアが低下しています")
+        with sync_col1:
+            if mode == "バッティング":
+                sync_options = {
+                    "スイング開始": "swing_start",
+                    "インパクト": "impact",
+                    "スイング終了": "swing_end",
+                }
             else:
-                st.info("スコア変化なし")
-
-            if comparison["improved"]:
-                st.markdown("**改善した項目:** " + ", ".join(comparison["improved"]))
-            if comparison["declined"]:
-                st.markdown("**低下した項目:** " + ", ".join(comparison["declined"]))
-
-            # 項目別スコア変化グラフ
-            fig_comp = go.Figure()
-            names = [d["name"] for d in comparison["detail_diffs"]]
-            scores_a_list = [d["score_a"] for d in comparison["detail_diffs"]]
-            scores_b_list = [d["score_b"] for d in comparison["detail_diffs"]]
-
-            fig_comp.add_trace(go.Bar(name="動画A", x=names, y=scores_a_list, marker_color="#FF9800"))
-            fig_comp.add_trace(go.Bar(name="動画B", x=names, y=scores_b_list, marker_color="#2196F3"))
-            fig_comp.update_layout(
-                barmode="group", height=250,
-                margin=dict(l=20, r=20, t=20, b=40),
-                template="plotly_dark",
-                legend=dict(orientation="h", y=1.1),
+                sync_options = {
+                    "投球開始": "pitch_start",
+                    "リリース": "release",
+                    "投球終了": "pitch_end",
+                }
+            sync_label = st.radio(
+                "同期基準",
+                list(sync_options.keys()),
+                help="2動画のどのタイミングを合わせるか選択",
+                key="sync_mode_radio",
+                horizontal=True,
             )
-            st.plotly_chart(fig_comp, use_container_width=True)
+            sync_mode = sync_options[sync_label]
+
+        with sync_col2:
+            manual_offset = st.slider(
+                "手動オフセット（フレーム）",
+                -120, 120, 0,
+                help="＋で動画Bを遅らせる、ーで動画Bを早める",
+                key="manual_offset",
+            )
+
+        # 同期ポイント再計算
+        if mode == "バッティング":
+            sync_a, sync_b = find_sync_point_batting(
+                st.session_state.swings, st.session_state.swings_b,
+                sync_mode=sync_mode)
+        else:
+            sync_a, sync_b = find_sync_point_pitching(
+                st.session_state.pitches, st.session_state.pitches_b,
+                sync_mode=sync_mode)
+
+        sync_b = sync_b + manual_offset
+        mapping = align_frames(reader_a.total_frames, reader_b.total_frames, sync_a, sync_b)
+
+        if not mapping:
+            mapping = [(i, i) for i in range(min(reader_a.total_frames, reader_b.total_frames))]
+
+        sync_info_col1, sync_info_col2, sync_info_col3 = st.columns(3)
+        with sync_info_col1:
+            st.caption(f"動画A 基準フレーム: F{sync_a}")
+        with sync_info_col2:
+            st.caption(f"動画B 基準フレーム: F{sync_b - manual_offset}" +
+                       (f" ({manual_offset:+d})" if manual_offset != 0 else ""))
+        with sync_info_col3:
+            st.caption(f"比較可能フレーム数: {len(mapping)}")
     else:
-        st.info("評価データがありません。動画にスイング/投球動作が含まれているか確認してください。")
-
-    # --- 角度類似度 ---
-    if mapping:
-        frames_a_list = [m[0] for m in mapping]
-        frames_b_list = [m[1] for m in mapping]
-        similarity, per_angle = calc_angle_similarity(
-            st.session_state.all_angles, st.session_state.all_angles_b,
-            frames_a_list, frames_b_list)
-
-        if per_angle:
-            st.markdown("---")
-            st.markdown("### 🎯 フォーム類似度")
-            st.metric("総合類似度", f"{similarity * 100:.0f}%")
-
-            sim_cols = st.columns(len(per_angle))
-            for i, (name, sim) in enumerate(per_angle.items()):
-                with sim_cols[i % len(sim_cols)]:
-                    color = "#4CAF50" if sim > 0.8 else "#FF9800" if sim > 0.6 else "#F44336"
-                    st.markdown(f"**{name}**")
-                    st.progress(sim)
+        # 動作未検出時はフレーム番号をそのまま1:1対応
+        st.info("スイング/投球動作が検出されなかったため、フレーム番号でそのまま比較します。")
+        mapping = [(i, i) for i in range(min(reader_a.total_frames, reader_b.total_frames))]
 
     # --- 同期フレームビューア ---
     st.markdown("---")
