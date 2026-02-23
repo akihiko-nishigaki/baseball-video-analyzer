@@ -3,14 +3,13 @@
 import numpy as np
 
 
-def calc_wrist_speed(landmarks_history, fps, wrist_idx=16, visibility_threshold=0.3):
+def calc_wrist_speed(landmarks_history, fps, wrist_idx=16):
     """手首の速度推移を計算
 
     Args:
         landmarks_history: {frame_idx: landmarks} のdict
         fps: 動画のFPS
         wrist_idx: 手首の関節インデックス（16=右手首, 15=左手首）
-        visibility_threshold: この値未満のvisibilityのフレームはスキップ
 
     Returns:
         speeds: [(frame_idx, speed), ...] のリスト
@@ -29,7 +28,7 @@ def calc_wrist_speed(landmarks_history, fps, wrist_idx=16, visibility_threshold=
             speeds.append((curr_f, 0.0))
             continue
 
-        if prev_lm[wrist_idx][3] < visibility_threshold or curr_lm[wrist_idx][3] < visibility_threshold:
+        if prev_lm[wrist_idx][3] < 0.5 or curr_lm[wrist_idx][3] < 0.5:
             speeds.append((curr_f, 0.0))
             continue
 
@@ -43,15 +42,15 @@ def calc_wrist_speed(landmarks_history, fps, wrist_idx=16, visibility_threshold=
     return speeds
 
 
-def detect_swings(wrist_speeds, fps, min_swing_frames=3):
+def detect_swings(wrist_speeds, fps, speed_threshold=0.8, min_swing_frames=5):
     """スイング区間を自動検出
 
     手首の速度が閾値を超えている連続区間をスイングとして検出。
-    閾値は動画の速度分布から自動計算（非ゼロ速度の70パーセンタイル）。
 
     Args:
         wrist_speeds: calc_wrist_speed() の戻り値
         fps: 動画のFPS
+        speed_threshold: スイング判定の速度閾値（正規化座標/秒）
         min_swing_frames: 最小スイングフレーム数
 
     Returns:
@@ -60,13 +59,11 @@ def detect_swings(wrist_speeds, fps, min_swing_frames=3):
     if not wrist_speeds:
         return []
 
-    # ゼロ以外の速度のみで統計を取る（pose検出失敗=0を除外）
-    nonzero_speeds = [s for _, s in wrist_speeds if s > 0.001]
-    if not nonzero_speeds:
-        return []
-
-    # 70パーセンタイルを閾値にする（上位30%の速い動きをスイング候補に）
-    adaptive_threshold = np.percentile(nonzero_speeds, 70)
+    # 速度の平均・標準偏差で閾値を自動調整
+    all_speeds = [s for _, s in wrist_speeds]
+    mean_speed = np.mean(all_speeds)
+    std_speed = np.std(all_speeds)
+    adaptive_threshold = max(speed_threshold, mean_speed + 1.5 * std_speed)
 
     # 閾値を超える区間を検出
     in_swing = False

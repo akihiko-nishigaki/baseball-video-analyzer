@@ -281,16 +281,8 @@ if app_mode == "2動画比較":
                     if i % 5 == 0:
                         progress.progress((i + 1) / reader_a.total_frames * 0.4, text=f"動画A骨格検出中... {i+1}/{reader_a.total_frames}")
 
-                ws_a_r = calc_wrist_speed(all_lm_a, reader_a.fps, wrist_idx=16)
-                ws_a_l = calc_wrist_speed(all_lm_a, reader_a.fps, wrist_idx=15)
-                sw_a_r = detect_swings(ws_a_r, reader_a.fps)
-                sw_a_l = detect_swings(ws_a_l, reader_a.fps)
-                if len(sw_a_l) > len(sw_a_r):
-                    ws_a, sw_a = ws_a_l, sw_a_l
-                elif len(sw_a_r) > 0:
-                    ws_a, sw_a = ws_a_r, sw_a_r
-                else:
-                    ws_a, sw_a = ws_a_r, sw_a_r
+                ws_a = calc_wrist_speed(all_lm_a, reader_a.fps, wrist_idx=16)
+                sw_a = detect_swings(ws_a, reader_a.fps)
                 ev_a = None
                 ph_a = []
                 pi_a = []
@@ -341,16 +333,8 @@ if app_mode == "2動画比較":
                     if i % 5 == 0:
                         progress_b.progress(0.45 + (i + 1) / reader_b.total_frames * 0.4, text=f"動画B骨格検出中... {i+1}/{reader_b.total_frames}")
 
-                ws_b_r = calc_wrist_speed(all_lm_b, reader_b.fps, wrist_idx=16)
-                ws_b_l = calc_wrist_speed(all_lm_b, reader_b.fps, wrist_idx=15)
-                sw_b_r = detect_swings(ws_b_r, reader_b.fps)
-                sw_b_l = detect_swings(ws_b_l, reader_b.fps)
-                if len(sw_b_l) > len(sw_b_r):
-                    ws_b, sw_b = ws_b_l, sw_b_l
-                elif len(sw_b_r) > 0:
-                    ws_b, sw_b = ws_b_r, sw_b_r
-                else:
-                    ws_b, sw_b = ws_b_r, sw_b_r
+                ws_b = calc_wrist_speed(all_lm_b, reader_b.fps, wrist_idx=16)
+                sw_b = detect_swings(ws_b, reader_b.fps)
                 ev_b = None
                 ph_b = []
                 pi_b = []
@@ -821,27 +805,8 @@ if not st.session_state.is_analyzed:
 
         # Step 2: スイング検出 & フェーズ分割
         progress.progress(0.75, text="スイングを検出中...")
-        # 左右両方の手首で検出し、より多くスイングが見つかった方を使用
-        wrist_speeds_r = calc_wrist_speed(all_landmarks, reader.fps, wrist_idx=16)
-        wrist_speeds_l = calc_wrist_speed(all_landmarks, reader.fps, wrist_idx=15)
-        swings_r = detect_swings(wrist_speeds_r, reader.fps)
-        swings_l = detect_swings(wrist_speeds_l, reader.fps)
-        if len(swings_l) > len(swings_r):
-            wrist_speeds = wrist_speeds_l
-            swings = swings_l
-        elif len(swings_r) > 0:
-            wrist_speeds = wrist_speeds_r
-            swings = swings_r
-        else:
-            # どちらも検出できなかった場合、ピーク速度が高い方を採用
-            max_r = max((s for _, s in wrist_speeds_r), default=0)
-            max_l = max((s for _, s in wrist_speeds_l), default=0)
-            if max_l > max_r:
-                wrist_speeds = wrist_speeds_l
-                swings = swings_l
-            else:
-                wrist_speeds = wrist_speeds_r
-                swings = swings_r
+        wrist_speeds = calc_wrist_speed(all_landmarks, reader.fps, wrist_idx=16)
+        swings = detect_swings(wrist_speeds, reader.fps)
 
         phases = []
         evaluation = None
@@ -978,24 +943,6 @@ if mode == "バッティング" and evaluation:
 
 elif mode == "バッティング" and not swings:
     st.warning("スイングが検出されませんでした。動画にバッティングの動きが含まれているか確認してください。")
-    # デバッグ情報
-    if st.session_state.wrist_speeds:
-        all_spd = [s for _, s in st.session_state.wrist_speeds]
-        if all_spd:
-            with st.expander("デバッグ情報（スイング検出）"):
-                detected_frames = sum(1 for lm in st.session_state.all_landmarks.values() if lm is not None)
-                total_frames = len(st.session_state.all_landmarks)
-                st.text(f"骨格検出率: {detected_frames}/{total_frames} フレーム ({detected_frames/max(total_frames,1)*100:.0f}%)")
-                nonzero = [s for s in all_spd if s > 0.001]
-                st.text(f"有効速度フレーム数: {len(nonzero)}/{len(all_spd)}")
-                if nonzero:
-                    st.text(f"手首速度(非ゼロ) - 最大: {max(nonzero):.4f}, 平均: {np.mean(nonzero):.4f}, 中央値: {np.median(nonzero):.4f}")
-                    threshold = np.percentile(nonzero, 70)
-                    st.text(f"適用閾値(70パーセンタイル): {threshold:.4f}")
-                    above = sum(1 for s in all_spd if s > threshold)
-                    st.text(f"閾値超えフレーム数: {above}")
-                else:
-                    st.error("手首の速度を計算できるフレームがありません。骨格検出精度が低い可能性があります。")
 
 
 # ─── ピッチング総合評価（ピッチングモード時） ───
