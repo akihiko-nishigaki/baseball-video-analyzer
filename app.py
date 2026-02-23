@@ -73,6 +73,22 @@ st.markdown("""
         width: auto !important;
         object-fit: contain;
     }
+    /* コマ送りボタンをスマホでも横並びに強制 */
+    @media (max-width: 768px) {
+        [data-testid="stHorizontalBlock"]:has(button) {
+            flex-wrap: nowrap !important;
+            gap: 0.25rem !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(button) [data-testid="stColumn"] {
+            min-width: 0 !important;
+            flex: 1 1 0 !important;
+        }
+        [data-testid="stHorizontalBlock"]:has(button) button {
+            padding: 0.25rem 0.4rem !important;
+            font-size: 0.75rem !important;
+            min-height: 0 !important;
+        }
+    }
 </style>
 """, unsafe_allow_html=True)
 
