@@ -19,7 +19,8 @@ from src.angle_analyzer import (
 )
 from src.swing_detector import calc_wrist_speed, detect_swings, calc_swing_metrics, calc_weight_shift
 from src.phase_detector import detect_batting_phases, get_phase_at_frame, get_phase_checkpoints, BATTING_PHASES
-from src.trajectory import draw_wrist_trajectory, draw_bat_path, draw_phase_indicator, calc_swing_arc_angle
+from src.trajectory import draw_wrist_trajectory, draw_bat_path, draw_phase_indicator, calc_swing_arc_angle, draw_ghost_skeletons
+from src.form_checker import check_batting_form, calc_head_stability, detect_body_opening_timing, create_sequential_photos
 from src.batting_evaluator import evaluate_batting
 from src.pitching_detector import (
     calc_throwing_arm_speed, detect_pitch_motion, detect_pitching_phases,
@@ -94,6 +95,11 @@ def init_session():
         "evaluation": None,
         "weight_data": [],
         "checkpoints": [],
+        # Phase 2.5 (form checks)
+        "form_checks": None,
+        "head_stability": None,
+        "body_opening": None,
+        "sequential_photo": None,
         # Phase 3 (pitching)
         "pitches": [],
         "pitching_phases": [],
@@ -167,6 +173,10 @@ if uploaded:
         st.session_state.pitching_evaluation = None
         st.session_state.release_info = None
         st.session_state.arm_slot = None
+        st.session_state.form_checks = None
+        st.session_state.head_stability = None
+        st.session_state.body_opening = None
+        st.session_state.sequential_photo = None
         st.session_state.current_frame = 0
 
 # 動画Bアップロード（比較モード時）
@@ -223,6 +233,8 @@ if mode == "バッティング":
     show_bat_path = st.sidebar.checkbox("バット軌道（推定）", value=False)
 else:
     show_bat_path = False
+show_ghost = st.sidebar.checkbox("残像表示（ゴースト）", value=False,
+                                  help="過去5フレーム分の骨格を半透明で表示")
 show_phase_banner = st.sidebar.checkbox("フェーズ表示", value=True)
 
 
@@ -813,6 +825,18 @@ if not st.session_state.is_analyzed:
         weight_data = []
         checkpoints = []
 
+        # ─── バッティングフォームチェック ───
+        form_checks = None
+        head_stability = None
+        body_opening = None
+
+        if mode == "バッティング" and swings:
+            progress.progress(0.78, text="フォームチェック中...")
+            best_swing = max(swings, key=lambda s: s[3])
+            form_checks = check_batting_form(all_landmarks, best_swing, rotation_history)
+            head_stability = calc_head_stability(all_landmarks, best_swing)
+            body_opening = detect_body_opening_timing(rotation_history, best_swing)
+
         # ─── ピッチング分析 or バッティング分析 ───
         pitches = []
         pitching_phases = []
@@ -860,6 +884,10 @@ if not st.session_state.is_analyzed:
         st.session_state.evaluation = evaluation
         st.session_state.weight_data = weight_data
         st.session_state.checkpoints = checkpoints
+        st.session_state.form_checks = form_checks
+        st.session_state.head_stability = head_stability
+        st.session_state.body_opening = body_opening
+        st.session_state.sequential_photo = None
         st.session_state.pitches = pitches
         st.session_state.pitching_phases = pitching_phases
         st.session_state.pitching_evaluation = pitching_evaluation
@@ -1098,6 +1126,13 @@ with col_video:
             frame = detector.draw_skeleton(frame, landmarks, angles_to_show)
             detector.close()
 
+        # 残像（ゴースト）表示
+        if show_ghost:
+            frame = draw_ghost_skeletons(
+                frame, st.session_state.all_landmarks, frame_idx,
+                ghost_count=5, ghost_step=3,
+            )
+
         # 手首の軌跡
         if show_wrist_trail:
             frame = draw_wrist_trajectory(
@@ -1160,6 +1195,14 @@ with col_angles:
     if rot is not None:
         st.metric("肩の開き", f"{rot:.1f}°")
 
+    # 頭の安定性メトリック（バッティング時）
+    if mode == "バッティング" and st.session_state.head_stability:
+        hs = st.session_state.head_stability
+        st.markdown("---")
+        st.markdown("#### 頭の安定性")
+        stability_label = "安定" if hs["stable"] else "ブレあり"
+        st.metric("判定", stability_label)
+        st.caption(f"X偏差: {hs['std_x']:.4f} / Y偏差: {hs['std_y']:.4f}")
 
     # ピッチング: 投球内かどうか
     if mode == "ピッチング":
@@ -1171,6 +1214,69 @@ with col_angles:
                 break
 
 
+
+
+# ─── フォームチェック（バッティング時） ───
+if mode == "バッティング" and st.session_state.form_checks:
+    st.markdown("---")
+    st.markdown("### 📋 フォームチェック")
+
+    for check in st.session_state.form_checks:
+        j = check["judgement"]
+        if j in ("適切", "安定", "伸びている", "前足寄り（体重移動OK）"):
+            css_class = "check-good"
+            icon = "✅"
+        elif j in ("検出不可",):
+            css_class = ""
+            icon = "❓"
+        else:
+            css_class = "check-warn"
+            icon = "⚠️"
+
+        st.markdown(
+            f'{icon} **{check["name"]}** — '
+            f'<span class="{css_class}">{j}</span> '
+            f'（{check["value"]}）',
+            unsafe_allow_html=True,
+        )
+        st.caption(check["detail"])
+
+    # 体の開き詳細
+    if st.session_state.body_opening:
+        bo = st.session_state.body_opening
+        st.markdown(f"**体の開きタイミング:** インパクト{bo['frames_before']}フレーム前 → {bo['judgement']}")
+        st.caption(bo["detail"])
+
+
+# ─── 連続写真 ───
+if mode == "バッティング" and swings:
+    st.markdown("---")
+    st.markdown("### 📸 連続写真")
+
+    if st.button("連続写真を生成", key="gen_seq_photo"):
+        best_swing = max(swings, key=lambda s: s[3])
+        with st.spinner("連続写真を生成中..."):
+            det = PoseDetector(min_detection_confidence=detection_conf)
+            grid = create_sequential_photos(
+                reader, st.session_state.all_landmarks, best_swing,
+                det, angle_defs, num_photos=8, cols=4,
+            )
+            det.close()
+            if grid is not None:
+                st.session_state.sequential_photo = grid
+
+    if st.session_state.sequential_photo is not None:
+        grid_rgb = cv2.cvtColor(st.session_state.sequential_photo, cv2.COLOR_BGR2RGB)
+        st.image(grid_rgb, caption="スイング連続写真（骨格付き）", use_container_width=True)
+
+        # ダウンロードボタン
+        _, buf = cv2.imencode(".png", st.session_state.sequential_photo)
+        st.download_button(
+            label="連続写真をダウンロード",
+            data=buf.tobytes(),
+            file_name="sequential_photos.png",
+            mime="image/png",
+        )
 
 
 # ─── 体重移動グラフ ───

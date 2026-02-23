@@ -163,6 +163,66 @@ def draw_phase_indicator(frame, phase_key, phase_info, progress_ratio=0):
     return frame
 
 
+def draw_ghost_skeletons(frame, landmarks_history, current_frame,
+                         ghost_count=5, ghost_step=3):
+    """残像（ゴースト）骨格を半透明で描画
+
+    過去のフレームの骨格を薄い色で重ねて表示し、動きの軌跡を視覚化する。
+
+    Args:
+        frame: BGR画像
+        landmarks_history: 全フレームのlandmarksデータ
+        current_frame: 現在のフレーム番号
+        ghost_count: 表示するゴーストの数 (default 5)
+        ghost_step: ゴースト間のフレーム間隔 (default 3)
+
+    Returns:
+        描画済みフレーム
+    """
+    h, w = frame.shape[:2]
+    overlay = frame.copy()
+
+    # 骨格接続線の定義
+    connections = [
+        (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
+        (11, 23), (12, 24), (23, 24),
+        (23, 25), (25, 27), (24, 26), (26, 28),
+        (15, 19), (16, 20),
+    ]
+
+    for gi in range(ghost_count, 0, -1):
+        ghost_frame = current_frame - gi * ghost_step
+        if ghost_frame < 0:
+            continue
+
+        lm = landmarks_history.get(ghost_frame)
+        if lm is None:
+            continue
+
+        # 古いほど透明度を上げる (alphaが小さい=薄い)
+        alpha = (ghost_count - gi + 1) / (ghost_count + 1)
+        color_intensity = int(255 * alpha * 0.6)
+        line_color = (color_intensity, int(color_intensity * 0.7), 0)  # 青みがかった色
+        point_color = (color_intensity, color_intensity, int(color_intensity * 0.5))
+
+        points = {}
+        for i, (x, y, z, v) in enumerate(lm):
+            if v > 0.5:
+                points[i] = (int(x * w), int(y * h))
+
+        # 接続線
+        for s, e in connections:
+            if s in points and e in points:
+                cv2.line(overlay, points[s], points[e], line_color, 1, cv2.LINE_AA)
+
+        # 関節点
+        for idx, (px, py) in points.items():
+            cv2.circle(overlay, (px, py), 2, point_color, -1, cv2.LINE_AA)
+
+    result = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
+    return result
+
+
 def calc_swing_arc_angle(landmarks_history, swing):
     """スイングアーク角度を計算
 
