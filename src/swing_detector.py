@@ -42,7 +42,7 @@ def calc_wrist_speed(landmarks_history, fps, wrist_idx=16):
     return speeds
 
 
-def detect_swings(wrist_speeds, fps, speed_threshold=0.8, min_swing_frames=5):
+def detect_swings(wrist_speeds, fps, speed_threshold=0.3, min_swing_frames=5):
     """スイング区間を自動検出
 
     手首の速度が閾値を超えている連続区間をスイングとして検出。
@@ -63,7 +63,8 @@ def detect_swings(wrist_speeds, fps, speed_threshold=0.8, min_swing_frames=5):
     all_speeds = [s for _, s in wrist_speeds]
     mean_speed = np.mean(all_speeds)
     std_speed = np.std(all_speeds)
-    adaptive_threshold = max(speed_threshold, mean_speed + 1.5 * std_speed)
+    # mean + 1.0*std を使い、下限は speed_threshold（0.3）で確保
+    adaptive_threshold = max(speed_threshold, mean_speed + 1.0 * std_speed)
 
     # 閾値を超える区間を検出
     in_swing = False
