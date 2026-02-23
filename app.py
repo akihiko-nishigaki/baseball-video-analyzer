@@ -12,7 +12,7 @@ import sys
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.dirname(__file__))
 
-from src.pose_detector import PoseDetector, KEY_LANDMARKS
+from src.pose_detector import PoseDetector, KEY_LANDMARKS, draw_skeleton
 from src.angle_analyzer import (
     BATTING_ANGLES, PITCHING_ANGLES,
     analyze_frame_angles, calc_body_rotation, calc_center_of_gravity,
@@ -581,9 +581,7 @@ if app_mode == "2動画比較":
     if fa is not None:
         lm_a = st.session_state.all_landmarks.get(frame_a_idx)
         if show_skeleton and lm_a:
-            det = PoseDetector(min_detection_confidence=detection_conf)
-            fa = det.draw_skeleton(fa, lm_a, angle_defs if show_angles_on_video else None)
-            det.close()
+            fa = draw_skeleton(fa, lm_a, angle_defs if show_angles_on_video else None)
         if show_wrist_trail:
             fa = draw_wrist_trajectory(fa, st.session_state.all_landmarks, frame_a_idx, trail_length=40)
         # ラベル描画
@@ -592,9 +590,7 @@ if app_mode == "2動画比較":
     if fb is not None:
         lm_b = st.session_state.all_landmarks_b.get(frame_b_idx)
         if show_skeleton and lm_b:
-            det = PoseDetector(min_detection_confidence=detection_conf)
-            fb = det.draw_skeleton(fb, lm_b, angle_defs if show_angles_on_video else None)
-            det.close()
+            fb = draw_skeleton(fb, lm_b, angle_defs if show_angles_on_video else None)
         if show_wrist_trail:
             fb = draw_wrist_trajectory(fb, st.session_state.all_landmarks_b, frame_b_idx, trail_length=40)
         cv2.putText(fb, "B", (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 160, 0), 3, cv2.LINE_AA)
@@ -1089,10 +1085,8 @@ with col_video:
 
         # 骨格描画
         if show_skeleton and landmarks:
-            detector = PoseDetector(min_detection_confidence=detection_conf)
             angles_to_show = angle_defs if show_angles_on_video else None
-            frame = detector.draw_skeleton(frame, landmarks, angles_to_show)
-            detector.close()
+            frame = draw_skeleton(frame, landmarks, angles_to_show)
 
         # 残像（ゴースト）表示
         if show_ghost:
@@ -1224,12 +1218,10 @@ if mode == "バッティング" and swings:
     if st.button("連続写真を生成", key="gen_seq_photo"):
         best_swing = max(swings, key=lambda s: s[3])
         with st.spinner("連続写真を生成中..."):
-            det = PoseDetector(min_detection_confidence=detection_conf)
             grid = create_sequential_photos(
                 reader, st.session_state.all_landmarks, best_swing,
-                det, angle_defs, num_photos=8, cols=4,
+                angle_defs, num_photos=8, cols=4,
             )
-            det.close()
             if grid is not None:
                 st.session_state.sequential_photo = grid
 

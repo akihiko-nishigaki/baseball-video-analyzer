@@ -87,59 +87,8 @@ class PoseDetector:
         return landmarks
 
     def draw_skeleton(self, frame, landmarks, show_angles=None):
-        """骨格をフレームに描画
-
-        Args:
-            frame: BGR画像
-            landmarks: detect() の戻り値
-            show_angles: 表示する角度のdict {名前: (idx_a, idx_b, idx_c)}
-
-        Returns:
-            描画済みフレーム
-        """
-        if landmarks is None:
-            return frame
-
-        h, w = frame.shape[:2]
-        overlay = frame.copy()
-
-        # 関節の座標をピクセルに変換
-        points = {}
-        for i, (x, y, z, v) in enumerate(landmarks):
-            if v > 0.5:
-                px, py = int(x * w), int(y * h)
-                points[i] = (px, py)
-
-        # 接続線を描画
-        for start, end in SKELETON_CONNECTIONS:
-            if start in points and end in points:
-                cv2.line(overlay, points[start], points[end],
-                         (0, 255, 0), 2, cv2.LINE_AA)
-
-        # 関節点を描画
-        for idx, (px, py) in points.items():
-            if idx in KEY_LANDMARKS.values():
-                cv2.circle(overlay, (px, py), 5, (0, 200, 255), -1, cv2.LINE_AA)
-                cv2.circle(overlay, (px, py), 5, (0, 255, 0), 1, cv2.LINE_AA)
-            else:
-                cv2.circle(overlay, (px, py), 3, (0, 255, 0), -1, cv2.LINE_AA)
-
-        # 角度テキストを描画
-        if show_angles:
-            from .angle_analyzer import calc_angle
-            for name, (a, b, c) in show_angles.items():
-                if a in points and b in points and c in points:
-                    angle = calc_angle(points[a], points[b], points[c])
-                    bx, by = points[b]
-                    cv2.putText(overlay, f"{angle:.0f}", (bx + 10, by - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2,
-                                cv2.LINE_AA)
-                    cv2.putText(overlay, f"{angle:.0f}", (bx + 10, by - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1,
-                                cv2.LINE_AA)
-
-        result = cv2.addWeighted(overlay, 0.8, frame, 0.2, 0)
-        return result
+        """骨格をフレームに描画（後方互換用ラッパー）"""
+        return draw_skeleton(frame, landmarks, show_angles)
 
     def close(self):
         self.landmarker.close()
@@ -149,3 +98,59 @@ class PoseDetector:
 
     def __exit__(self, *args):
         self.close()
+
+
+def draw_skeleton(frame, landmarks, show_angles=None):
+    """骨格をフレームに描画（PoseDetectorインスタンス不要）
+
+    Args:
+        frame: BGR画像
+        landmarks: detect() の戻り値
+        show_angles: 表示する角度のdict {名前: (idx_a, idx_b, idx_c)}
+
+    Returns:
+        描画済みフレーム
+    """
+    if landmarks is None:
+        return frame
+
+    h, w = frame.shape[:2]
+    overlay = frame.copy()
+
+    # 関節の座標をピクセルに変換
+    points = {}
+    for i, (x, y, z, v) in enumerate(landmarks):
+        if v > 0.5:
+            px, py = int(x * w), int(y * h)
+            points[i] = (px, py)
+
+    # 接続線を描画
+    for start, end in SKELETON_CONNECTIONS:
+        if start in points and end in points:
+            cv2.line(overlay, points[start], points[end],
+                     (0, 255, 0), 2, cv2.LINE_AA)
+
+    # 関節点を描画
+    for idx, (px, py) in points.items():
+        if idx in KEY_LANDMARKS.values():
+            cv2.circle(overlay, (px, py), 5, (0, 200, 255), -1, cv2.LINE_AA)
+            cv2.circle(overlay, (px, py), 5, (0, 255, 0), 1, cv2.LINE_AA)
+        else:
+            cv2.circle(overlay, (px, py), 3, (0, 255, 0), -1, cv2.LINE_AA)
+
+    # 角度テキストを描画
+    if show_angles:
+        from .angle_analyzer import calc_angle
+        for name, (a, b, c) in show_angles.items():
+            if a in points and b in points and c in points:
+                angle = calc_angle(points[a], points[b], points[c])
+                bx, by = points[b]
+                cv2.putText(overlay, f"{angle:.0f}", (bx + 10, by - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2,
+                            cv2.LINE_AA)
+                cv2.putText(overlay, f"{angle:.0f}", (bx + 10, by - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 1,
+                            cv2.LINE_AA)
+
+    result = cv2.addWeighted(overlay, 0.8, frame, 0.2, 0)
+    return result

@@ -280,7 +280,7 @@ def detect_body_opening_timing(rotation_history, swing):
     }
 
 
-def create_sequential_photos(reader, landmarks_history, swing, detector, angle_defs,
+def create_sequential_photos(reader, landmarks_history, swing, angle_defs,
                              num_photos=8, cols=4):
     """連続写真を生成（骨格付き等間隔8枚→グリッド画像）
 
@@ -288,7 +288,6 @@ def create_sequential_photos(reader, landmarks_history, swing, detector, angle_d
         reader: VideoReader インスタンス
         landmarks_history: 全フレームのlandmarksデータ
         swing: (start, end, peak, peak_speed) タプル
-        detector: PoseDetector インスタンス
         angle_defs: 角度定義dict
         num_photos: 抽出枚数 (default 8)
         cols: 列数 (default 4)
@@ -319,7 +318,8 @@ def create_sequential_photos(reader, landmarks_history, swing, detector, angle_d
             continue
         lm = landmarks_history.get(fidx)
         if lm:
-            frame = detector.draw_skeleton(frame, lm, angle_defs)
+            from .pose_detector import draw_skeleton
+            frame = draw_skeleton(frame, lm, angle_defs)
         # フレーム番号を表示
         cv2.putText(frame, f"F{fidx}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
