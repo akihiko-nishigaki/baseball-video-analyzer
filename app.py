@@ -1079,64 +1079,62 @@ if mode == "ピッチング" and pitches:
 
 
 # ─── 動画フレーム＋骨格表示 ───
-col_video, col_angles = st.columns([3, 1])
+frame = reader.get_frame(frame_idx)
+if frame is not None:
+    landmarks = st.session_state.all_landmarks.get(frame_idx)
 
-with col_video:
-    frame = reader.get_frame(frame_idx)
-    if frame is not None:
-        landmarks = st.session_state.all_landmarks.get(frame_idx)
+    # 骨格描画
+    if show_skeleton and landmarks:
+        angles_to_show = angle_defs if show_angles_on_video else None
+        frame = draw_skeleton(frame, landmarks, angles_to_show)
 
-        # 骨格描画
-        if show_skeleton and landmarks:
-            angles_to_show = angle_defs if show_angles_on_video else None
-            frame = draw_skeleton(frame, landmarks, angles_to_show)
+    # 残像（ゴースト）表示
+    if show_ghost:
+        frame = draw_ghost_skeletons(
+            frame, st.session_state.all_landmarks, frame_idx,
+            ghost_count=5, ghost_step=3,
+        )
 
-        # 残像（ゴースト）表示
-        if show_ghost:
-            frame = draw_ghost_skeletons(
-                frame, st.session_state.all_landmarks, frame_idx,
-                ghost_count=5, ghost_step=3,
-            )
+    # 手首の軌跡
+    if show_wrist_trail:
+        frame = draw_wrist_trajectory(
+            frame, st.session_state.all_landmarks, frame_idx,
+            trail_length=40,
+        )
 
-        # 手首の軌跡
-        if show_wrist_trail:
-            frame = draw_wrist_trajectory(
-                frame, st.session_state.all_landmarks, frame_idx,
-                trail_length=40,
-            )
+    # バット軌道
+    if show_bat_path:
+        frame = draw_bat_path(
+            frame, st.session_state.all_landmarks, frame_idx,
+            trail_length=30,
+        )
 
-        # バット軌道
-        if show_bat_path:
-            frame = draw_bat_path(
-                frame, st.session_state.all_landmarks, frame_idx,
-                trail_length=30,
-            )
+    # フェーズ表示バナー（ピッチング時のみ）
+    if show_phase_banner and mode == "ピッチング" and pitching_phases:
+        phase_key, phase_info = get_pitching_phase_at_frame(pitching_phases, frame_idx)
+        if phase_key and phase_info:
+            progress_ratio = 0
+            for pk, ps, pe in pitching_phases:
+                if pk == phase_key:
+                    progress_ratio = (frame_idx - ps) / max(1, pe - ps)
+                    break
+            frame = draw_phase_indicator(frame, phase_key, phase_info, progress_ratio)
 
-        # フェーズ表示バナー（ピッチング時のみ）
-        if show_phase_banner and mode == "ピッチング" and pitching_phases:
-            phase_key, phase_info = get_pitching_phase_at_frame(pitching_phases, frame_idx)
-            if phase_key and phase_info:
-                progress_ratio = 0
-                for pk, ps, pe in pitching_phases:
-                    if pk == phase_key:
-                        progress_ratio = (frame_idx - ps) / max(1, pe - ps)
-                        break
-                frame = draw_phase_indicator(frame, phase_key, phase_info, progress_ratio)
+    # リリースポイントマーカー（ピッチング時）
+    if mode == "ピッチング" and st.session_state.release_info:
+        rel = st.session_state.release_info
+        if frame_idx == rel["frame"]:
+            h_f, w_f = frame.shape[:2]
+            rx, ry = int(rel["position"][0] * w_f), int(rel["position"][1] * h_f)
+            cv2.circle(frame, (rx, ry), 12, (0, 0, 255), 3, cv2.LINE_AA)
+            cv2.putText(frame, "RELEASE", (rx + 15, ry - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
 
-        # リリースポイントマーカー（ピッチング時）
-        if mode == "ピッチング" and st.session_state.release_info:
-            rel = st.session_state.release_info
-            if frame_idx == rel["frame"]:
-                h_f, w_f = frame.shape[:2]
-                rx, ry = int(rel["position"][0] * w_f), int(rel["position"][1] * h_f)
-                cv2.circle(frame, (rx, ry), 12, (0, 0, 255), 3, cv2.LINE_AA)
-                cv2.putText(frame, "RELEASE", (rx + 15, ry - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    st.image(frame_rgb, use_container_width=True)
 
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        st.image(frame_rgb, use_container_width=True)
-
-with col_angles:
+# ─── 角度・フェーズ情報 ───
+with st.expander("📐 現在の角度・詳細", expanded=False):
     # フェーズ表示
     if mode == "ピッチング" and pitching_phases:
         phase_key, phase_info = get_pitching_phase_at_frame(pitching_phases, frame_idx)
@@ -1148,11 +1146,13 @@ with col_angles:
             )
             st.markdown("")
 
-    st.markdown("#### 📐 現在の角度")
     angles = st.session_state.all_angles.get(frame_idx, {})
     if angles:
-        for name, value in angles.items():
-            st.metric(name, f"{value:.1f}°")
+        # 横に並べてコンパクトに表示
+        angle_cols = st.columns(min(len(angles), 4))
+        for i, (name, value) in enumerate(angles.items()):
+            with angle_cols[i % len(angle_cols)]:
+                st.metric(name, f"{value:.1f}°")
     else:
         st.caption("検出なし")
 
@@ -1164,9 +1164,8 @@ with col_angles:
     if mode == "バッティング" and st.session_state.head_stability:
         hs = st.session_state.head_stability
         st.markdown("---")
-        st.markdown("#### 頭の安定性")
         stability_label = "安定" if hs["stable"] else "ブレあり"
-        st.metric("判定", stability_label)
+        st.metric("頭の安定性", stability_label)
         st.caption(f"X偏差: {hs['std_x']:.4f} / Y偏差: {hs['std_y']:.4f}")
 
     # ピッチング: 投球内かどうか
