@@ -539,14 +539,17 @@ if app_mode == "2動画比較":
     # mappingサイズが変わった場合にcompare_frameをクランプ
     max_idx = len(mapping) - 1
     clamped = min(st.session_state.compare_frame, max_idx)
-    if clamped != st.session_state.compare_frame:
-        st.session_state.compare_frame = clamped
+    st.session_state.compare_frame = clamped
+
+    # session state経由でデフォルト値を設定（value引数との競合を避ける）
+    if "compare_slider" not in st.session_state:
+        st.session_state.compare_slider = clamped
+    else:
         st.session_state.compare_slider = clamped
 
     compare_idx = st.slider(
         "比較フレーム",
         0, max_idx,
-        clamped,
         key="compare_slider",
     )
     st.session_state.compare_frame = compare_idx
