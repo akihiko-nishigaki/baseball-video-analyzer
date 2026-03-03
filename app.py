@@ -544,8 +544,9 @@ if app_mode == "2動画比較":
     # session state経由でデフォルト値を設定（value引数との競合を避ける）
     if "compare_slider" not in st.session_state:
         st.session_state.compare_slider = clamped
-    else:
-        st.session_state.compare_slider = clamped
+    elif st.session_state.compare_slider > max_idx:
+        # mappingサイズ縮小時のみクランプ（ユーザー操作は上書きしない）
+        st.session_state.compare_slider = max_idx
 
     compare_idx = st.slider(
         "比較フレーム",
@@ -1032,10 +1033,13 @@ if "_jump_to" in st.session_state:
 
 col_slider, col_info = st.columns([4, 1])
 with col_slider:
+    # keyベースで状態管理（value引数との競合を避ける）
+    if "frame_slider" not in st.session_state:
+        st.session_state.frame_slider = st.session_state.current_frame
+
     frame_idx = st.slider(
         "フレーム",
         0, reader.total_frames - 1,
-        st.session_state.current_frame,
         key="frame_slider",
     )
     st.session_state.current_frame = frame_idx
