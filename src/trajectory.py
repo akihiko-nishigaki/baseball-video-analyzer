@@ -55,8 +55,10 @@ def _estimate_bat_tip(lm):
 
     推定ロジック:
     1. 両手首の中点をグリップ位置とする
-    2. 肘→手首方向をバットの向きとする（指先より安定）
-    3. 肩幅を基準にバット長を動的計算（肩幅×約3.5 = 少年バット）
+    2. 方向: 手首→人差し指（優先）/ 肘→手首（フォールバック）
+    3. 実測比率でバット長を計算
+
+    visibility閾値は0.25（スイング中のブレに対応）
 
     Args:
         lm: landmarks リスト [(x, y, z, visibility), ...]
@@ -64,49 +66,50 @@ def _estimate_bat_tip(lm):
     Returns:
         (tip_x, tip_y) 正規化座標 or None
     """
-    re = lm[14]  # 右肘
-    rw = lm[16]  # 右手首
-    le = lm[13]  # 左肘
-    lw = lm[15]  # 左手首
-    ls = lm[11]  # 左肩
-    rs = lm[12]  # 右肩
+    VIS = 0.25  # 低い閾値でスイング中もキャプチャ
 
-    # 右肘・右手首は必須
-    if re[3] < 0.5 or rw[3] < 0.5:
+    rw = lm[16]  # 右手首
+    ri = lm[20]  # 右人差し指先端
+    re = lm[14]  # 右肘
+    lw = lm[15]  # 左手首
+
+    # 右手首は必須
+    if rw[3] < VIS:
         return None
 
-    # グリップ位置: 両手首が見えれば中点、片方のみなら右手首
-    if lw[3] > 0.5:
+    # グリップ位置: 両手首中点
+    if lw[3] > VIS:
         grip_x = (rw[0] + lw[0]) / 2
         grip_y = (rw[1] + lw[1]) / 2
     else:
-        grip_x = rw[0]
-        grip_y = rw[1]
+        grip_x, grip_y = rw[0], rw[1]
 
-    # バットの方向: 肘→手首のベクトル（指先より安定）
-    dx = rw[0] - re[0]
-    dy = rw[1] - re[1]
-    forearm_len = np.sqrt(dx ** 2 + dy ** 2)
-    if forearm_len < 0.001:
-        return None
+    # 方向とスケールの決定
+    # 優先1: 手首→人差し指（バット方向に最も近い）
+    if ri[3] > VIS:
+        dx = ri[0] - rw[0]
+        dy = ri[1] - rw[1]
+        ref_len = np.sqrt(dx ** 2 + dy ** 2)
+        if ref_len > 0.005:
+            # 手首→指先≈18cm, グリップ→バット先端≈60cm → ×3.3
+            scale = 3.5
+            tip_x = grip_x + (dx / ref_len) * ref_len * scale
+            tip_y = grip_y + (dy / ref_len) * ref_len * scale
+            return (tip_x, tip_y)
 
-    # バット長の推定: 肩幅基準で動的計算
-    if ls[3] > 0.5 and rs[3] > 0.5:
-        shoulder_w = np.sqrt((rs[0] - ls[0]) ** 2 + (rs[1] - ls[1]) ** 2)
-        # 少年バット≒肩幅の3.5倍、前腕からの比率に換算
-        bat_length = shoulder_w * 3.5
-    else:
-        # 肩幅不明時: 前腕の4.5倍（大まかな推定）
-        bat_length = forearm_len * 4.5
+    # 優先2: 肘→手首方向
+    if re[3] > VIS:
+        dx = rw[0] - re[0]
+        dy = rw[1] - re[1]
+        ref_len = np.sqrt(dx ** 2 + dy ** 2)
+        if ref_len > 0.005:
+            # 前腕≈25cm, グリップ→バット先端≈60cm → ×2.4
+            scale = 2.5
+            tip_x = grip_x + (dx / ref_len) * ref_len * scale
+            tip_y = grip_y + (dy / ref_len) * ref_len * scale
+            return (tip_x, tip_y)
 
-    # 方向を正規化して延長
-    dir_x = dx / forearm_len
-    dir_y = dy / forearm_len
-
-    tip_x = grip_x + dir_x * bat_length
-    tip_y = grip_y + dir_y * bat_length
-
-    return (tip_x, tip_y)
+    return None
 
 
 def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30):
@@ -128,45 +131,46 @@ def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30):
 
     trail_start = max(0, current_frame - trail_length)
 
-    bat_tips = []
+    # 先端座標を収集
+    raw_tips = []
     for f in range(trail_start, current_frame + 1):
         lm = landmarks_history.get(f)
         if lm is None:
-            bat_tips.append(None)
             continue
-
         tip = _estimate_bat_tip(lm)
         if tip:
-            bat_tips.append((int(tip[0] * w), int(tip[1] * h)))
-        else:
-            bat_tips.append(None)
+            raw_tips.append((f, (int(tip[0] * w), int(tip[1] * h))))
+
+    # 欠落フレームを線形補間で埋める（最大6フレームギャップ）
+    tips = _interpolate_tips(raw_tips, max_gap=6)
 
     # バット軌道を描画
-    valid_tips = [(i, p) for i, p in enumerate(bat_tips) if p is not None]
-    for j in range(1, len(valid_tips)):
-        idx, pt = valid_tips[j]
-        _, prev_pt = valid_tips[j-1]
-        alpha = (j + 1) / len(valid_tips)
+    for j in range(1, len(tips)):
+        _, pt = tips[j]
+        _, prev_pt = tips[j - 1]
+        alpha = (j + 1) / len(tips)
         color = (0, int(200 * alpha), int(255 * alpha))
         thickness = max(1, int(4 * alpha))
         cv2.line(overlay, prev_pt, pt, color, thickness, cv2.LINE_AA)
 
     # 現在のバット位置
-    if valid_tips:
-        _, last_pt = valid_tips[-1]
+    if tips:
+        _, last_pt = tips[-1]
         cv2.circle(overlay, last_pt, 8, (0, 200, 255), -1, cv2.LINE_AA)
         cv2.circle(overlay, last_pt, 8, (255, 255, 255), 2, cv2.LINE_AA)
 
     # 現フレームのバットの線（グリップ→バット先端）
     lm = landmarks_history.get(current_frame)
-    if lm and lm[16][3] > 0.5 and bat_tips and bat_tips[-1]:
+    cur_tip = _estimate_bat_tip(lm) if lm else None
+    if lm and lm[16][3] > 0.25 and cur_tip:
         rw = lm[16]
         lw = lm[15]
-        if lw[3] > 0.5:
+        if lw[3] > 0.25:
             grip_px = (int((rw[0] + lw[0]) / 2 * w), int((rw[1] + lw[1]) / 2 * h))
         else:
             grip_px = (int(rw[0] * w), int(rw[1] * h))
-        cv2.line(overlay, grip_px, bat_tips[-1], (255, 255, 255), 2, cv2.LINE_AA)
+        tip_px = (int(cur_tip[0] * w), int(cur_tip[1] * h))
+        cv2.line(overlay, grip_px, tip_px, (255, 255, 255), 2, cv2.LINE_AA)
 
     result = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
     return result
