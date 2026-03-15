@@ -131,7 +131,7 @@ class BatDetector:
         total = reader.total_frames
 
         for i in range(total):
-            frame = reader.read_frame(i)
+            frame = reader.get_frame(i)
             if frame is None:
                 continue
 
