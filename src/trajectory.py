@@ -51,14 +51,7 @@ def draw_wrist_trajectory(frame, landmarks_history, current_frame,
 
 
 def _estimate_bat_tip(lm):
-    """1フレームのlandmarksからバット先端位置を推定
-
-    推定ロジック:
-    1. 両手首の中点をグリップ位置とする
-    2. 方向: 手首→人差し指（優先）/ 肘→手首（フォールバック）
-    3. 実測比率でバット長を計算
-
-    visibility閾値は0.25（スイング中のブレに対応）
+    """1フレームのlandmarksからバット先端位置を推定（フォールバック用）
 
     Args:
         lm: landmarks リスト [(x, y, z, visibility), ...]
@@ -66,44 +59,37 @@ def _estimate_bat_tip(lm):
     Returns:
         (tip_x, tip_y) 正規化座標 or None
     """
-    VIS = 0.25  # 低い閾値でスイング中もキャプチャ
+    VIS = 0.25
 
-    rw = lm[16]  # 右手首
-    ri = lm[20]  # 右人差し指先端
-    re = lm[14]  # 右肘
-    lw = lm[15]  # 左手首
+    rw = lm[16]
+    ri = lm[20]
+    re = lm[14]
+    lw = lm[15]
 
-    # 右手首は必須
     if rw[3] < VIS:
         return None
 
-    # グリップ位置: 両手首中点
     if lw[3] > VIS:
         grip_x = (rw[0] + lw[0]) / 2
         grip_y = (rw[1] + lw[1]) / 2
     else:
         grip_x, grip_y = rw[0], rw[1]
 
-    # 方向とスケールの決定
-    # 優先1: 手首→人差し指（バット方向に最も近い）
     if ri[3] > VIS:
         dx = ri[0] - rw[0]
         dy = ri[1] - rw[1]
         ref_len = np.sqrt(dx ** 2 + dy ** 2)
         if ref_len > 0.005:
-            # 手首→指先≈18cm, グリップ→バット先端≈60cm → ×3.3
             scale = 3.5
             tip_x = grip_x + (dx / ref_len) * ref_len * scale
             tip_y = grip_y + (dy / ref_len) * ref_len * scale
             return (tip_x, tip_y)
 
-    # 優先2: 肘→手首方向
     if re[3] > VIS:
         dx = rw[0] - re[0]
         dy = rw[1] - re[1]
         ref_len = np.sqrt(dx ** 2 + dy ** 2)
         if ref_len > 0.005:
-            # 前腕≈25cm, グリップ→バット先端≈60cm → ×2.4
             scale = 2.5
             tip_x = grip_x + (dx / ref_len) * ref_len * scale
             tip_y = grip_y + (dy / ref_len) * ref_len * scale
@@ -112,16 +98,147 @@ def _estimate_bat_tip(lm):
     return None
 
 
-def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30):
-    """バットの軌道を推定して描画（改善版）
+def compute_motion_bat_tips(reader, landmarks_history, progress_cb=None):
+    """フレーム差分でバット先端位置を検出
 
-    肘→手首方向 + 肩幅基準スケールでバット先端を推定。
+    連続フレーム間の差分から動きのある領域を検出し、
+    手首から外側方向で最も遠い動き点をバット先端とする。
+
+    Args:
+        reader: VideoReader
+        landmarks_history: {frame_idx: landmarks}
+        progress_cb: callback(current, total)
+
+    Returns:
+        {frame_idx: (tip_x, tip_y)} ピクセル座標
+    """
+    tips = {}
+    prev_gray = None
+    total = reader.total_frames
+
+    for frame_idx, frame in reader.iter_frames():
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        if prev_gray is not None:
+            lm = landmarks_history.get(frame_idx)
+            if lm is not None:
+                tip = _detect_tip_from_motion(prev_gray, gray, lm, frame.shape)
+                if tip:
+                    tips[frame_idx] = tip
+
+        prev_gray = gray
+
+        if progress_cb and frame_idx % 10 == 0:
+            progress_cb(frame_idx, total)
+
+    return tips
+
+
+def _detect_tip_from_motion(prev_gray, curr_gray, lm, frame_shape):
+    """1フレーム分のモーションベースのバット先端検出
+
+    手首から外側方向（体の中心→手首→延長）に向かう
+    動き領域の最遠点をバット先端とする。
+
+    Args:
+        prev_gray: 前フレームのグレースケール
+        curr_gray: 現フレームのグレースケール
+        lm: landmarks
+        frame_shape: (h, w, c)
+
+    Returns:
+        (tip_x, tip_y) ピクセル座標 or None
+    """
+    VIS = 0.2
+    h, w = frame_shape[:2]
+
+    rw = lm[16]
+    if rw[3] < VIS:
+        return None
+
+    wrist_x = int(rw[0] * w)
+    wrist_y = int(rw[1] * h)
+
+    # 体の中心点（腰 or 肩の中点）
+    if lm[23][3] > VIS and lm[24][3] > VIS:
+        cx = int((lm[23][0] + lm[24][0]) / 2 * w)
+        cy = int((lm[23][1] + lm[24][1]) / 2 * h)
+    elif lm[11][3] > VIS and lm[12][3] > VIS:
+        cx = int((lm[11][0] + lm[12][0]) / 2 * w)
+        cy = int((lm[11][1] + lm[12][1]) / 2 * h)
+    else:
+        return None
+
+    # フレーム差分
+    diff = cv2.absdiff(prev_gray, curr_gray)
+    _, mask = cv2.threshold(diff, 20, 255, cv2.THRESH_BINARY)
+
+    # ノイズ除去
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.dilate(mask, kernel, iterations=2)
+
+    # 動きのあるピクセル
+    ys, xs = np.where(mask > 0)
+    if len(ys) < 30:
+        return None
+
+    # 体→手首方向（外側方向）
+    out_dx = float(wrist_x - cx)
+    out_dy = float(wrist_y - cy)
+    out_len = np.sqrt(out_dx ** 2 + out_dy ** 2)
+    if out_len < 10:
+        return None
+    out_dx /= out_len
+    out_dy /= out_len
+
+    # 手首からの相対位置
+    rel_x = xs.astype(np.float32) - wrist_x
+    rel_y = ys.astype(np.float32) - wrist_y
+
+    # 外側方向の成分が正（手首より外側にある点のみ）
+    dots = rel_x * out_dx + rel_y * out_dy
+    outward = dots > 0
+
+    if not np.any(outward):
+        return None
+
+    out_xs = xs[outward]
+    out_ys = ys[outward]
+    dists = np.sqrt((out_xs - wrist_x) ** 2 + (out_ys - wrist_y) ** 2)
+
+    # 手そのものを除外（最低距離）
+    min_dist = max(30, out_len * 0.3)
+    far_enough = dists > min_dist
+
+    if not np.any(far_enough):
+        return None
+
+    far_dists = dists[far_enough]
+    far_xs = out_xs[far_enough]
+    far_ys = out_ys[far_enough]
+
+    # 上位5%の点の重心をバット先端とする（外れ値ノイズ軽減）
+    threshold = np.percentile(far_dists, 95)
+    top = far_dists >= threshold
+
+    tip_x = int(np.mean(far_xs[top]))
+    tip_y = int(np.mean(far_ys[top]))
+
+    return (tip_x, tip_y)
+
+
+def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30,
+                  motion_tips=None):
+    """バットの軌道を描画（モーション検出優先、推定フォールバック）
 
     Args:
         frame: BGR画像
         landmarks_history: 全フレームのlandmarks
         current_frame: 現在のフレーム番号
         trail_length: 軌跡の長さ
+        motion_tips: {frame_idx: (x, y)} モーション検出結果（ピクセル座標）
 
     Returns:
         描画済みフレーム
@@ -131,9 +248,15 @@ def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30):
 
     trail_start = max(0, current_frame - trail_length)
 
-    # 先端座標を収集
+    # 先端座標を収集（モーション検出 > 推定 の優先順位）
     raw_tips = []
     for f in range(trail_start, current_frame + 1):
+        # モーション検出結果があればそちらを使う
+        if motion_tips and f in motion_tips:
+            raw_tips.append((f, motion_tips[f]))
+            continue
+
+        # フォールバック: MediaPipe推定
         lm = landmarks_history.get(f)
         if lm is None:
             continue
@@ -141,7 +264,7 @@ def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30):
         if tip:
             raw_tips.append((f, (int(tip[0] * w), int(tip[1] * h))))
 
-    # 欠落フレームを線形補間で埋める（最大6フレームギャップ）
+    # 欠落フレームを線形補間で埋める
     tips = _interpolate_tips(raw_tips, max_gap=6)
 
     # バット軌道を描画
@@ -153,24 +276,30 @@ def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30):
         thickness = max(1, int(4 * alpha))
         cv2.line(overlay, prev_pt, pt, color, thickness, cv2.LINE_AA)
 
-    # 現在のバット位置
+    # 現在のバット位置マーカー
     if tips:
         _, last_pt = tips[-1]
         cv2.circle(overlay, last_pt, 8, (0, 200, 255), -1, cv2.LINE_AA)
         cv2.circle(overlay, last_pt, 8, (255, 255, 255), 2, cv2.LINE_AA)
 
-    # 現フレームのバットの線（グリップ→バット先端）
+    # 現フレームのバットの線（グリップ→先端）
     lm = landmarks_history.get(current_frame)
-    cur_tip = _estimate_bat_tip(lm) if lm else None
-    if lm and lm[16][3] > 0.25 and cur_tip:
+    cur_tip_px = None
+    if motion_tips and current_frame in motion_tips:
+        cur_tip_px = motion_tips[current_frame]
+    elif lm:
+        est = _estimate_bat_tip(lm)
+        if est:
+            cur_tip_px = (int(est[0] * w), int(est[1] * h))
+
+    if lm and lm[16][3] > 0.25 and cur_tip_px:
         rw = lm[16]
         lw = lm[15]
         if lw[3] > 0.25:
             grip_px = (int((rw[0] + lw[0]) / 2 * w), int((rw[1] + lw[1]) / 2 * h))
         else:
             grip_px = (int(rw[0] * w), int(rw[1] * h))
-        tip_px = (int(cur_tip[0] * w), int(cur_tip[1] * h))
-        cv2.line(overlay, grip_px, tip_px, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.line(overlay, grip_px, cur_tip_px, (255, 255, 255), 2, cv2.LINE_AA)
 
     result = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
     return result

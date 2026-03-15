@@ -19,7 +19,7 @@ from src.angle_analyzer import (
 )
 from src.swing_detector import calc_wrist_speed, detect_swings, calc_swing_metrics, calc_weight_shift
 from src.phase_detector import detect_batting_phases, get_phase_at_frame, get_phase_checkpoints, BATTING_PHASES
-from src.trajectory import draw_wrist_trajectory, draw_bat_path, draw_phase_indicator, calc_swing_arc_angle, draw_ghost_skeletons, draw_detected_bat_path
+from src.trajectory import draw_wrist_trajectory, draw_bat_path, draw_phase_indicator, calc_swing_arc_angle, draw_ghost_skeletons, draw_detected_bat_path, compute_motion_bat_tips
 from src.form_checker import check_batting_form, calc_head_stability, detect_body_opening_timing, create_sequential_photos
 from src.batting_evaluator import evaluate_batting
 from src.pitching_detector import (
@@ -106,6 +106,8 @@ def init_session():
         "rotation_history": [],
         # Bat detection (YOLO)
         "bat_detections": {},
+        # Bat tip (motion-based)
+        "motion_bat_tips": {},
         # Phase 2
         "wrist_speeds": [],
         "swings": [],
@@ -196,6 +198,7 @@ if uploaded:
         st.session_state.body_opening = None
         st.session_state.sequential_photo = None
         st.session_state.bat_detections = {}
+        st.session_state.motion_bat_tips = {}
         st.session_state.current_frame = 0
 
 # 動画Bアップロード（比較モード時）
@@ -844,7 +847,19 @@ if not st.session_state.is_analyzed:
                 pitching_evaluation = evaluate_pitching(
                     all_landmarks, best_pitch, reader.fps, arm=arm)
 
-        # Step 3: バット物体検出（有効時のみ）
+        # Step 3: モーションベースのバット先端検出（バッティング時）
+        motion_bat_tips = {}
+        if show_bat_path and mode == "バッティング":
+            progress.progress(0.92, text="バット先端をモーション検出中...")
+            motion_bat_tips = compute_motion_bat_tips(
+                reader, all_landmarks,
+                progress_cb=lambda cur, tot: progress.progress(
+                    0.92 + 0.05 * cur / max(1, tot),
+                    text=f"バット先端検出中... {cur}/{tot}"
+                ),
+            )
+
+        # Step 4: バット物体検出（有効時のみ）
         bat_detections = {}
         if show_bat_path_detected and mode == "バッティング":
             try:
@@ -885,6 +900,7 @@ if not st.session_state.is_analyzed:
         st.session_state.release_info = release_info
         st.session_state.arm_slot = arm_slot_val
         st.session_state.bat_detections = bat_detections
+        st.session_state.motion_bat_tips = motion_bat_tips
         st.session_state.is_analyzed = True
         st.rerun()
     else:
@@ -1135,6 +1151,7 @@ if frame is not None:
         frame = draw_bat_path(
             frame, st.session_state.all_landmarks, frame_idx,
             trail_length=30,
+            motion_tips=st.session_state.get("motion_bat_tips"),
         )
 
     # バット軌道（物体検出）
