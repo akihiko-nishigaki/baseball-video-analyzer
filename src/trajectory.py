@@ -284,82 +284,100 @@ def _detect_tip_optical_flow(prev_gray, curr_gray, lm, frame_shape):
     バット先端は回転運動の最外点であり、物理的に最も速く動く。
     Farneback dense optical flowで各ピクセルの速度を計算し、
     手首外側方向で「速度×距離」スコアが最大の領域をバット先端とする。
+    CPU軽量化のため半分の解像度で計算する。
     """
-    info = _get_wrist_info(lm, frame_shape)
-    if info is None:
+    try:
+        info = _get_wrist_info(lm, frame_shape)
+        if info is None:
+            return None
+
+        wrist_x, wrist_y = info['wrist']
+        h, w = frame_shape[:2]
+
+        # 半分の解像度にダウンスケール（CPU負荷軽減）
+        scale = 0.5
+        small_prev = cv2.resize(prev_gray, None, fx=scale, fy=scale,
+                                interpolation=cv2.INTER_AREA)
+        small_curr = cv2.resize(curr_gray, None, fx=scale, fy=scale,
+                                interpolation=cv2.INTER_AREA)
+        sh, sw = small_prev.shape[:2]
+        s_wrist_x = wrist_x * scale
+        s_wrist_y = wrist_y * scale
+
+        # Dense optical flow（軽量パラメータ）
+        flow = cv2.calcOpticalFlowFarneback(
+            small_prev, small_curr, None,
+            pyr_scale=0.5, levels=3, winsize=11,
+            iterations=2, poly_n=5, poly_sigma=1.1,
+            flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN
+        )
+
+        # フロー速度（magnitude）
+        mag = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+
+        # ノイズ除去: 最低速度閾値（スケールに合わせて調整）
+        motion_mask = mag > 1.5
+        ys, xs = np.where(motion_mask)
+        if len(ys) < 10:
+            return None
+
+        # 体→手首方向でフィルタ（手首より外側の点のみ）
+        body_center = info.get('body_center')
+        if body_center is not None:
+            body_cx, body_cy = body_center
+            s_body_cx = body_cx * scale
+            s_body_cy = body_cy * scale
+            out_dx = float(s_wrist_x - s_body_cx)
+            out_dy = float(s_wrist_y - s_body_cy)
+            out_len = np.sqrt(out_dx**2 + out_dy**2)
+            if out_len > 5:
+                out_dx /= out_len
+                out_dy /= out_len
+                rel_x = xs.astype(np.float32) - s_wrist_x
+                rel_y = ys.astype(np.float32) - s_wrist_y
+                dots = rel_x * out_dx + rel_y * out_dy
+                outward = dots > 0
+                if np.any(outward):
+                    xs = xs[outward]
+                    ys = ys[outward]
+
+        if len(ys) < 5:
+            return None
+
+        mags = mag[ys, xs]
+        dists = np.sqrt((xs.astype(np.float32) - s_wrist_x)**2 +
+                        (ys.astype(np.float32) - s_wrist_y)**2)
+
+        # 手自体を除外（スケール調整）
+        far_enough = dists > 15
+        if not np.any(far_enough):
+            return None
+
+        xs = xs[far_enough]
+        ys = ys[far_enough]
+        mags = mags[far_enough]
+        dists = dists[far_enough]
+
+        # スコア = 速度 × 距離（バット先端 = 速い + 遠い）
+        scores = mags * dists
+
+        # 上位3%の重心
+        threshold = np.percentile(scores, 97)
+        top = scores >= threshold
+        if not np.any(top):
+            return None
+
+        # 元の解像度に戻す
+        tip_x = int(np.mean(xs[top]) / scale)
+        tip_y = int(np.mean(ys[top]) / scale)
+
+        if not (0 <= tip_x < w and 0 <= tip_y < h):
+            return None
+
+        return (tip_x, tip_y)
+
+    except Exception:
         return None
-
-    wrist_x, wrist_y = info['wrist']
-    h, w = frame_shape[:2]
-
-    # Dense optical flow (大きな変位に対応するパラメータ)
-    flow = cv2.calcOpticalFlowFarneback(
-        prev_gray, curr_gray, None,
-        pyr_scale=0.5, levels=5, winsize=15,
-        iterations=3, poly_n=7, poly_sigma=1.5,
-        flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN
-    )
-
-    # フロー速度（magnitude）
-    mag = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
-
-    # ノイズ除去: 最低速度閾値
-    motion_mask = mag > 3.0
-    ys, xs = np.where(motion_mask)
-    if len(ys) < 10:
-        return None
-
-    # 体→手首方向でフィルタ（手首より外側の点のみ）
-    body_center = info.get('body_center')
-    if body_center is not None:
-        body_cx, body_cy = body_center
-        out_dx = float(wrist_x - body_cx)
-        out_dy = float(wrist_y - body_cy)
-        out_len = np.sqrt(out_dx**2 + out_dy**2)
-        if out_len > 10:
-            out_dx /= out_len
-            out_dy /= out_len
-            rel_x = xs.astype(np.float32) - wrist_x
-            rel_y = ys.astype(np.float32) - wrist_y
-            dots = rel_x * out_dx + rel_y * out_dy
-            outward = dots > 0
-            if np.any(outward):
-                xs = xs[outward]
-                ys = ys[outward]
-
-    if len(ys) < 5:
-        return None
-
-    mags = mag[ys, xs]
-    dists = np.sqrt((xs.astype(np.float32) - wrist_x)**2 +
-                    (ys.astype(np.float32) - wrist_y)**2)
-
-    # 手自体を除外
-    far_enough = dists > 30
-    if not np.any(far_enough):
-        return None
-
-    xs = xs[far_enough]
-    ys = ys[far_enough]
-    mags = mags[far_enough]
-    dists = dists[far_enough]
-
-    # スコア = 速度 × 距離（バット先端 = 速い + 遠い）
-    scores = mags * dists
-
-    # 上位3%の重心
-    threshold = np.percentile(scores, 97)
-    top = scores >= threshold
-    if not np.any(top):
-        return None
-
-    tip_x = int(np.mean(xs[top]))
-    tip_y = int(np.mean(ys[top]))
-
-    if not (0 <= tip_x < w and 0 <= tip_y < h):
-        return None
-
-    return (tip_x, tip_y)
 
 
 def _detect_tip_farthest(motion_mask, lm, frame_shape):
@@ -484,13 +502,17 @@ def compute_motion_bat_tips(reader, landmarks_history, progress_cb=None):
         motion = cv2.dilate(motion, kernel, iterations=2)
 
         # 多段検出: OpticalFlow → Ellipse → LSD → Farthest
-        tip = _detect_tip_optical_flow(gray_buf[1], gray_buf[2], lm, frame.shape)
-        if tip is None:
-            tip = _detect_tip_ellipse(motion, lm, frame.shape)
-        if tip is None:
-            tip = _detect_tip_lsd(gray_buf[2], motion, lm, frame.shape)
-        if tip is None:
-            tip = _detect_tip_farthest(motion, lm, frame.shape)
+        tip = None
+        try:
+            tip = _detect_tip_optical_flow(gray_buf[1], gray_buf[2], lm, frame.shape)
+            if tip is None:
+                tip = _detect_tip_ellipse(motion, lm, frame.shape)
+            if tip is None:
+                tip = _detect_tip_lsd(gray_buf[2], motion, lm, frame.shape)
+            if tip is None:
+                tip = _detect_tip_farthest(motion, lm, frame.shape)
+        except Exception:
+            tip = None
 
         # Kalmanフィルター更新
         if tip is not None:
