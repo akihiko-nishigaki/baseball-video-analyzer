@@ -98,61 +98,33 @@ def _estimate_bat_tip(lm):
     return None
 
 
-def compute_motion_bat_tips(reader, landmarks_history, progress_cb=None):
-    """フレーム差分でバット先端位置を検出
-
-    連続フレーム間の差分から動きのある領域を検出し、
-    手首から外側方向で最も遠い動き点をバット先端とする。
-
-    Args:
-        reader: VideoReader
-        landmarks_history: {frame_idx: landmarks}
-        progress_cb: callback(current, total)
-
-    Returns:
-        {frame_idx: (tip_x, tip_y)} ピクセル座標
-    """
-    tips = {}
-    prev_gray = None
-    total = reader.total_frames
-
-    for frame_idx, frame in reader.iter_frames():
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
-
-        if prev_gray is not None:
-            lm = landmarks_history.get(frame_idx)
-            if lm is not None:
-                tip = _detect_tip_from_motion(prev_gray, gray, lm, frame.shape)
-                if tip:
-                    tips[frame_idx] = tip
-
-        prev_gray = gray
-
-        if progress_cb and frame_idx % 10 == 0:
-            progress_cb(frame_idx, total)
-
-    return tips
+def _create_kalman_filter():
+    """バット先端追跡用2D Kalmanフィルター (位置+速度)"""
+    kf = cv2.KalmanFilter(4, 2)
+    kf.transitionMatrix = np.array([
+        [1, 0, 1, 0],
+        [0, 1, 0, 1],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ], dtype=np.float32)
+    kf.measurementMatrix = np.array([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0]
+    ], dtype=np.float32)
+    kf.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
+    kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
+    kf.errorCovPost = np.eye(4, dtype=np.float32)
+    return kf
 
 
-def _detect_tip_from_motion(prev_gray, curr_gray, lm, frame_shape):
-    """1フレーム分のモーションベースのバット先端検出
-
-    手首から外側方向（体の中心→手首→延長）に向かう
-    動き領域の最遠点をバット先端とする。
-
-    Args:
-        prev_gray: 前フレームのグレースケール
-        curr_gray: 現フレームのグレースケール
-        lm: landmarks
-        frame_shape: (h, w, c)
+def _get_wrist_info(lm, frame_shape):
+    """手首と体の基準点をピクセル座標で取得
 
     Returns:
-        (tip_x, tip_y) ピクセル座標 or None
+        dict with 'wrist' and 'body_center' keys, or None
     """
     VIS = 0.2
     h, w = frame_shape[:2]
-
     rw = lm[16]
     if rw[3] < VIS:
         return None
@@ -160,44 +132,181 @@ def _detect_tip_from_motion(prev_gray, curr_gray, lm, frame_shape):
     wrist_x = int(rw[0] * w)
     wrist_y = int(rw[1] * h)
 
-    # 体の中心点（腰 or 肩の中点）
+    body_cx, body_cy = None, None
     if lm[23][3] > VIS and lm[24][3] > VIS:
-        cx = int((lm[23][0] + lm[24][0]) / 2 * w)
-        cy = int((lm[23][1] + lm[24][1]) / 2 * h)
+        body_cx = int((lm[23][0] + lm[24][0]) / 2 * w)
+        body_cy = int((lm[23][1] + lm[24][1]) / 2 * h)
     elif lm[11][3] > VIS and lm[12][3] > VIS:
-        cx = int((lm[11][0] + lm[12][0]) / 2 * w)
-        cy = int((lm[11][1] + lm[12][1]) / 2 * h)
-    else:
+        body_cx = int((lm[11][0] + lm[12][0]) / 2 * w)
+        body_cy = int((lm[11][1] + lm[12][1]) / 2 * h)
+
+    return {
+        'wrist': (wrist_x, wrist_y),
+        'body_center': (body_cx, body_cy) if body_cx is not None else None
+    }
+
+
+def _detect_tip_ellipse(motion_mask, lm, frame_shape):
+    """Stage 2: fitEllipseで棒状輪郭からバット先端を検出
+
+    モーションマスクの輪郭に楕円をフィットし、
+    アスペクト比 > 2.5 の棒状領域の長軸端点のうち
+    手首から遠い方をバット先端とする。
+    """
+    info = _get_wrist_info(lm, frame_shape)
+    if info is None:
         return None
 
-    # フレーム差分
-    diff = cv2.absdiff(prev_gray, curr_gray)
-    _, mask = cv2.threshold(diff, 20, 255, cv2.THRESH_BINARY)
+    wrist_x, wrist_y = info['wrist']
+    h, w = frame_shape[:2]
 
-    # ノイズ除去
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.dilate(mask, kernel, iterations=2)
+    contours, _ = cv2.findContours(
+        motion_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # 動きのあるピクセル
-    ys, xs = np.where(mask > 0)
+    best_tip = None
+    best_score = 0
+
+    for cnt in contours:
+        if len(cnt) < 5:
+            continue
+        area = cv2.contourArea(cnt)
+        if area < 100 or area > w * h * 0.3:
+            continue
+
+        ellipse = cv2.fitEllipse(cnt)
+        center, (d1, d2), angle = ellipse
+
+        if min(d1, d2) < 1:
+            continue
+        aspect = max(d1, d2) / min(d1, d2)
+
+        if aspect < 2.5:
+            continue
+
+        # 長軸の2端点を算出
+        if d1 >= d2:
+            half = d1 / 2
+            a_rad = np.radians(angle)
+        else:
+            half = d2 / 2
+            a_rad = np.radians(angle + 90)
+
+        dx = half * np.cos(a_rad)
+        dy = half * np.sin(a_rad)
+        ep1 = (int(center[0] + dx), int(center[1] + dy))
+        ep2 = (int(center[0] - dx), int(center[1] - dy))
+
+        # 手首から遠い端点 = バット先端
+        dist1 = np.sqrt((ep1[0] - wrist_x)**2 + (ep1[1] - wrist_y)**2)
+        dist2 = np.sqrt((ep2[0] - wrist_x)**2 + (ep2[1] - wrist_y)**2)
+
+        if dist1 > dist2:
+            tip, tip_dist = ep1, dist1
+        else:
+            tip, tip_dist = ep2, dist2
+
+        if tip_dist < 30:
+            continue
+        if not (0 <= tip[0] < w and 0 <= tip[1] < h):
+            continue
+
+        score = aspect * tip_dist
+        if score > best_score:
+            best_score = score
+            best_tip = tip
+
+    return best_tip
+
+
+def _detect_tip_lsd(gray, motion_mask, lm, frame_shape):
+    """Stage 3: LSD線分検出でモーションブラーの線からバット先端を検出
+
+    動き領域内で検出した線分のうち、一端が手首付近にあり
+    最も長い線分の遠端をバット先端とする。
+    """
+    info = _get_wrist_info(lm, frame_shape)
+    if info is None:
+        return None
+
+    wrist_x, wrist_y = info['wrist']
+    h, w = frame_shape[:2]
+
+    masked = cv2.bitwise_and(gray, gray, mask=motion_mask)
+
+    try:
+        lsd = cv2.createLineSegmentDetector(cv2.LSD_REFINE_STD)
+        lines = lsd.detect(masked)[0]
+    except Exception:
+        return None
+
+    if lines is None:
+        return None
+
+    best_tip = None
+    best_score = 0
+
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+
+        if length < 30:
+            continue
+
+        d1w = np.sqrt((x1 - wrist_x)**2 + (y1 - wrist_y)**2)
+        d2w = np.sqrt((x2 - wrist_x)**2 + (y2 - wrist_y)**2)
+
+        # 少なくとも一端が手首からフレーム幅30%以内
+        if min(d1w, d2w) > w * 0.3:
+            continue
+
+        # 手首から遠い端 = 先端
+        if d1w > d2w:
+            tip = (int(x1), int(y1))
+            tip_dist = d1w
+        else:
+            tip = (int(x2), int(y2))
+            tip_dist = d2w
+
+        if not (0 <= tip[0] < w and 0 <= tip[1] < h):
+            continue
+
+        score = length * tip_dist
+        if score > best_score:
+            best_score = score
+            best_tip = tip
+
+    return best_tip
+
+
+def _detect_tip_farthest(motion_mask, lm, frame_shape):
+    """Stage 4: 手首外側方向の最遠動きピクセルをバット先端とする
+
+    体の中心→手首方向に延長し、その方向の動きピクセルの
+    上位5%の重心をバット先端とする（最終フォールバック）。
+    """
+    info = _get_wrist_info(lm, frame_shape)
+    if info is None or info['body_center'] is None:
+        return None
+
+    wrist_x, wrist_y = info['wrist']
+    body_cx, body_cy = info['body_center']
+    h, w = frame_shape[:2]
+
+    ys, xs = np.where(motion_mask > 0)
     if len(ys) < 30:
         return None
 
-    # 体→手首方向（外側方向）
-    out_dx = float(wrist_x - cx)
-    out_dy = float(wrist_y - cy)
-    out_len = np.sqrt(out_dx ** 2 + out_dy ** 2)
+    out_dx = float(wrist_x - body_cx)
+    out_dy = float(wrist_y - body_cy)
+    out_len = np.sqrt(out_dx**2 + out_dy**2)
     if out_len < 10:
         return None
     out_dx /= out_len
     out_dy /= out_len
 
-    # 手首からの相対位置
     rel_x = xs.astype(np.float32) - wrist_x
     rel_y = ys.astype(np.float32) - wrist_y
 
-    # 外側方向の成分が正（手首より外側にある点のみ）
     dots = rel_x * out_dx + rel_y * out_dy
     outward = dots > 0
 
@@ -206,9 +315,8 @@ def _detect_tip_from_motion(prev_gray, curr_gray, lm, frame_shape):
 
     out_xs = xs[outward]
     out_ys = ys[outward]
-    dists = np.sqrt((out_xs - wrist_x) ** 2 + (out_ys - wrist_y) ** 2)
+    dists = np.sqrt((out_xs - wrist_x)**2 + (out_ys - wrist_y)**2)
 
-    # 手そのものを除外（最低距離）
     min_dist = max(30, out_len * 0.3)
     far_enough = dists > min_dist
 
@@ -219,14 +327,113 @@ def _detect_tip_from_motion(prev_gray, curr_gray, lm, frame_shape):
     far_xs = out_xs[far_enough]
     far_ys = out_ys[far_enough]
 
-    # 上位5%の点の重心をバット先端とする（外れ値ノイズ軽減）
     threshold = np.percentile(far_dists, 95)
     top = far_dists >= threshold
 
     tip_x = int(np.mean(far_xs[top]))
     tip_y = int(np.mean(far_ys[top]))
 
+    if not (0 <= tip_x < w and 0 <= tip_y < h):
+        return None
+
     return (tip_x, tip_y)
+
+
+def compute_motion_bat_tips(reader, landmarks_history, progress_cb=None):
+    """多段パイプラインでバット先端位置を検出
+
+    Pipeline:
+    1. 3-frame differencing + CLAHE → motion mask
+    2. Contour + fitEllipse → 棒状領域の長軸端点
+    3. LSD line detection → ブラーストリークの線端点
+    4. Farthest outward motion → 最遠動きピクセル重心
+    + Kalman filter で軌道予測・平滑化
+
+    Args:
+        reader: VideoReader
+        landmarks_history: {frame_idx: landmarks}
+        progress_cb: callback(current, total)
+
+    Returns:
+        {frame_idx: (tip_x, tip_y)} ピクセル座標
+    """
+    tips = {}
+    gray_buf = [None, None, None]
+    total = reader.total_frames
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    kf = _create_kalman_filter()
+    kf_init = False
+    miss = 0
+    MAX_MISS = 8
+
+    for frame_idx, frame in reader.iter_frames():
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = clahe.apply(gray)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # 3フレームバッファをシフト
+        gray_buf[0] = gray_buf[1]
+        gray_buf[1] = gray_buf[2]
+        gray_buf[2] = gray
+
+        if gray_buf[0] is None:
+            if progress_cb and frame_idx % 10 == 0:
+                progress_cb(frame_idx, total)
+            continue
+
+        lm = landmarks_history.get(frame_idx)
+        if lm is None:
+            miss += 1
+            if progress_cb and frame_idx % 10 == 0:
+                progress_cb(frame_idx, total)
+            continue
+
+        # 3-frame differencing (cavity問題を解決)
+        d1 = cv2.absdiff(gray_buf[0], gray_buf[1])
+        d2 = cv2.absdiff(gray_buf[1], gray_buf[2])
+        motion = cv2.bitwise_and(d1, d2)
+        _, motion = cv2.threshold(motion, 15, 255, cv2.THRESH_BINARY)
+
+        kernel = np.ones((3, 3), np.uint8)
+        motion = cv2.morphologyEx(motion, cv2.MORPH_OPEN, kernel)
+        motion = cv2.dilate(motion, kernel, iterations=2)
+
+        # 多段検出: Ellipse → LSD → Farthest
+        tip = _detect_tip_ellipse(motion, lm, frame.shape)
+        if tip is None:
+            tip = _detect_tip_lsd(gray_buf[2], motion, lm, frame.shape)
+        if tip is None:
+            tip = _detect_tip_farthest(motion, lm, frame.shape)
+
+        # Kalmanフィルター更新
+        if tip is not None:
+            if not kf_init:
+                kf.statePost = np.array(
+                    [[np.float32(tip[0])], [np.float32(tip[1])],
+                     [0.], [0.]], dtype=np.float32)
+                kf_init = True
+            else:
+                kf.predict()
+                kf.correct(np.array(
+                    [[np.float32(tip[0])], [np.float32(tip[1])]],
+                    dtype=np.float32))
+            tips[frame_idx] = tip
+            miss = 0
+        elif kf_init and miss < MAX_MISS:
+            pred = kf.predict()
+            px, py = int(pred[0, 0]), int(pred[1, 0])
+            fh, fw = frame.shape[:2]
+            if 0 <= px < fw and 0 <= py < fh:
+                tips[frame_idx] = (px, py)
+            miss += 1
+        else:
+            miss += 1
+
+        if progress_cb and frame_idx % 10 == 0:
+            progress_cb(frame_idx, total)
+
+    return tips
 
 
 def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30,
