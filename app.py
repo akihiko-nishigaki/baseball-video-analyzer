@@ -249,7 +249,7 @@ if mode == "ピッチング":
 st.sidebar.markdown("### 軌跡表示")
 show_wrist_trail = st.sidebar.checkbox("手首の軌跡", value=True)
 if mode == "バッティング":
-    show_bat_path = st.sidebar.checkbox("バット軌道", value=False)
+    show_bat_path = st.sidebar.checkbox("バット軌道", value=False, key="show_bat_path")
 else:
     show_bat_path = False
 show_ghost = st.sidebar.checkbox("残像表示（ゴースト）", value=False,
@@ -852,6 +852,7 @@ if not st.session_state.is_analyzed:
                     text=f"バット先端検出中... {cur}/{tot}"
                 ),
             )
+            st.toast(f"バット先端検出: {len(motion_bat_tips)}フレーム / {reader.total_frames}フレーム中")
 
         progress.progress(1.0, text="完了！")
         progress.empty()
