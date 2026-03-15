@@ -1,5 +1,6 @@
-"""YOLOv8によるバット物体検出・トラッキング"""
+"""YOLOv8-segによるバット物体検出・トラッキング（セグメンテーション方式）"""
 
+import cv2
 import numpy as np
 
 try:
@@ -13,7 +14,7 @@ BASEBALL_BAT_CLASS = 38
 
 
 class BatDetector:
-    """YOLOv8を使ったバット検出クラス"""
+    """YOLOv8-segを使ったバット検出クラス（セグメンテーション方式）"""
 
     def __init__(self, model_size="n", confidence=0.3):
         """
@@ -26,23 +27,19 @@ class BatDetector:
                 "ultralytics がインストールされていません。"
                 "'pip install ultralytics' を実行してください。"
             )
-        self.model = YOLO(f"yolov8{model_size}.pt")
+        # セグメンテーションモデルを使用
+        self.model = YOLO(f"yolov8{model_size}-seg.pt")
         self.confidence = confidence
 
     def detect(self, frame, wrist_pos=None):
-        """1フレームからバットを検出
+        """1フレームからバットを検出（セグメンテーション）
 
         Args:
             frame: BGR画像 (numpy array)
-            wrist_pos: 右手首のピクセル座標 (x, y) - 先端推定に使用
+            wrist_pos: 右手首のピクセル座標 (x, y) - 先端特定に使用
 
         Returns:
-            dict: {bbox, confidence, center, tip, handle} or None
-                bbox: (x1, y1, x2, y2) バウンディングボックス
-                confidence: 検出信頼度
-                center: (cx, cy) バットの中心座標
-                tip: (tx, ty) バット先端の推定座標
-                handle: (hx, hy) グリップ側の推定座標
+            dict: {bbox, confidence, center, tip, handle, mask} or None
         """
         results = self.model(
             frame,
@@ -63,8 +60,12 @@ class BatDetector:
         x1, y1, x2, y2 = box
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
 
-        # バット先端の推定
-        tip, handle = self._estimate_tip(box, wrist_pos)
+        # セグメンテーションマスクから先端を特定
+        tip, handle = self._find_tip_from_mask(results[0], best_idx, frame.shape, wrist_pos)
+
+        # マスクが取れなかった場合はbboxコーナーにフォールバック
+        if tip is None:
+            tip, handle = self._estimate_tip_from_bbox(box, wrist_pos)
 
         return {
             "bbox": (float(x1), float(y1), float(x2), float(y2)),
@@ -74,47 +75,82 @@ class BatDetector:
             "handle": handle,
         }
 
-    def _estimate_tip(self, bbox, wrist_pos=None):
-        """バウンディングボックスからバット先端とグリップ端を推定
+    def _find_tip_from_mask(self, result, idx, frame_shape, wrist_pos):
+        """セグメンテーションマスクの輪郭からバット先端を特定
 
-        bboxの4隅のうち、対角線上にある2コーナーをバットの両端とみなす。
-        手首に最も近いコーナーがグリップ側、対角のコーナーが先端。
+        マスクの輪郭点のうち、手首から最も遠い点 = バット先端。
+        手首から最も近い点 = グリップ端。
 
         Args:
-            bbox: (x1, y1, x2, y2)
-            wrist_pos: (wx, wy) 手首のピクセル座標
+            result: YOLO推論結果
+            idx: 使用するマスクのインデックス
+            frame_shape: フレームの(h, w, c)
+            wrist_pos: (wx, wy) 手首座標
 
         Returns:
-            (tip, handle): それぞれ (x, y) のタプル
+            (tip, handle) or (None, None)
         """
+        if result.masks is None or len(result.masks) <= idx:
+            return None, None
+
+        # マスクの正規化座標を取得
+        mask_xy = result.masks[idx].xy
+        if len(mask_xy) == 0 or len(mask_xy[0]) < 3:
+            return None, None
+
+        contour = mask_xy[0]  # (N, 2) の輪郭点配列
+
+        h, w = frame_shape[:2]
+
+        if wrist_pos is None:
+            # 手首情報なし: 輪郭の重心から最も遠い点を先端とする
+            centroid = contour.mean(axis=0)
+            dists = np.sqrt(np.sum((contour - centroid) ** 2, axis=1))
+            tip_idx = np.argmax(dists)
+            tip_pt = contour[tip_idx]
+
+            # 先端の反対側（先端から最も遠い輪郭点）をグリップとする
+            dists_from_tip = np.sqrt(np.sum((contour - tip_pt) ** 2, axis=1))
+            handle_idx = np.argmax(dists_from_tip)
+            handle_pt = contour[handle_idx]
+
+            return (float(tip_pt[0]), float(tip_pt[1])), \
+                   (float(handle_pt[0]), float(handle_pt[1]))
+
+        # 手首から最も遠い輪郭点 = バット先端
+        wx, wy = wrist_pos
+        dists = np.sqrt((contour[:, 0] - wx) ** 2 + (contour[:, 1] - wy) ** 2)
+        tip_idx = np.argmax(dists)
+        tip_pt = contour[tip_idx]
+
+        # 手首から最も近い輪郭点 = グリップ端
+        handle_idx = np.argmin(dists)
+        handle_pt = contour[handle_idx]
+
+        return (float(tip_pt[0]), float(tip_pt[1])), \
+               (float(handle_pt[0]), float(handle_pt[1]))
+
+    def _estimate_tip_from_bbox(self, bbox, wrist_pos):
+        """フォールバック: bboxコーナーからバット先端を推定"""
         x1, y1, x2, y2 = bbox
 
-        # bboxの4コーナー
         corners = [
-            (float(x1), float(y1)),  # 左上
-            (float(x2), float(y1)),  # 右上
-            (float(x1), float(y2)),  # 左下
-            (float(x2), float(y2)),  # 右下
+            (float(x1), float(y1)),
+            (float(x2), float(y1)),
+            (float(x1), float(y2)),
+            (float(x2), float(y2)),
         ]
 
         if wrist_pos is None:
-            # 手首情報なし: bbox中心から最も遠いコーナーを先端とする
-            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-            # 対角線が長い方を使用（左上-右下 vs 右上-左下）
             return corners[3], corners[0]
 
-        # 手首に最も近いコーナー = グリップ側
         wx, wy = wrist_pos
         dists = [(c[0] - wx) ** 2 + (c[1] - wy) ** 2 for c in corners]
         handle_idx = int(np.argmin(dists))
-        handle = corners[handle_idx]
-
-        # 対角コーナー = 先端 (0↔3, 1↔2)
         diagonal_map = {0: 3, 1: 2, 2: 1, 3: 0}
         tip_idx = diagonal_map[handle_idx]
-        tip = corners[tip_idx]
 
-        return tip, handle
+        return corners[tip_idx], corners[handle_idx]
 
     def detect_all_frames(self, reader, landmarks_history=None, progress_cb=None):
         """全フレームでバット検出を実行
@@ -135,7 +171,7 @@ class BatDetector:
             if frame is None:
                 continue
 
-            # 手首座標をピクセルに変換（検出精度向上のため）
+            # 手首座標をピクセルに変換
             wrist_pos = None
             if landmarks_history and i in landmarks_history:
                 lm = landmarks_history[i]
