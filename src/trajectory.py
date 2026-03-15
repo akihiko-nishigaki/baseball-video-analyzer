@@ -259,8 +259,40 @@ def calc_swing_arc_angle(landmarks_history, swing):
     return arc_angle
 
 
+def _interpolate_tips(tips, max_gap=8):
+    """検出が途切れたフレーム間を線形補間で埋める
+
+    Args:
+        tips: [(frame_idx, (x, y)), ...] 検出済みの先端座標
+        max_gap: 補間する最大フレーム間隔（これ以上離れていたら補間しない）
+
+    Returns:
+        interpolated: [(frame_idx, (x, y)), ...] 補間済みリスト
+    """
+    if len(tips) < 2:
+        return tips
+
+    interpolated = [tips[0]]
+    for j in range(1, len(tips)):
+        prev_f, (px, py) = tips[j - 1]
+        curr_f, (cx, cy) = tips[j]
+        gap = curr_f - prev_f
+
+        if 1 < gap <= max_gap:
+            # 線形補間で中間フレームを生成
+            for k in range(1, gap):
+                t = k / gap
+                ix = int(px + (cx - px) * t)
+                iy = int(py + (cy - py) * t)
+                interpolated.append((prev_f + k, (ix, iy)))
+
+        interpolated.append(tips[j])
+
+    return interpolated
+
+
 def draw_detected_bat_path(frame, bat_detections, current_frame, trail_length=30):
-    """YOLO検出結果に基づくバット先端軌道を描画
+    """YOLO検出結果に基づくバット先端軌道を描画（補間付き）
 
     Args:
         frame: BGR画像
@@ -275,11 +307,14 @@ def draw_detected_bat_path(frame, bat_detections, current_frame, trail_length=30
     trail_start = max(0, current_frame - trail_length)
 
     # 軌跡用の先端座標を収集
-    tips = []
+    raw_tips = []
     for f in range(trail_start, current_frame + 1):
         det = bat_detections.get(f)
         if det and det["tip"]:
-            tips.append((f, (int(det["tip"][0]), int(det["tip"][1]))))
+            raw_tips.append((f, (int(det["tip"][0]), int(det["tip"][1]))))
+
+    # 欠落フレームを線形補間で埋める
+    tips = _interpolate_tips(raw_tips, max_gap=8)
 
     # 軌跡を緑系グラデーションで描画
     for j in range(1, len(tips)):

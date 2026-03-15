@@ -16,7 +16,7 @@ BASEBALL_BAT_CLASS = 38
 class BatDetector:
     """YOLOv8-segを使ったバット検出クラス（セグメンテーション方式）"""
 
-    def __init__(self, model_size="n", confidence=0.3):
+    def __init__(self, model_size="n", confidence=0.15):
         """
         Args:
             model_size: YOLOv8モデルサイズ ("n"=nano, "s"=small, "m"=medium)

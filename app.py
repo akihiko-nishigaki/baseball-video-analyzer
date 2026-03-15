@@ -850,7 +850,7 @@ if not st.session_state.is_analyzed:
             try:
                 from src.bat_detector import BatDetector
                 progress.progress(0.95, text="バットを検出中（YOLO）...")
-                bat_det = BatDetector(model_size="n", confidence=0.3)
+                bat_det = BatDetector(model_size="n", confidence=0.15)
                 bat_detections = bat_det.detect_all_frames(
                     reader, all_landmarks,
                     progress_cb=lambda cur, tot: progress.progress(
