@@ -250,15 +250,8 @@ st.sidebar.markdown("### 軌跡表示")
 show_wrist_trail = st.sidebar.checkbox("手首の軌跡", value=True)
 if mode == "バッティング":
     show_bat_path = st.sidebar.checkbox("バット軌道（推定）", value=False)
-    try:
-        from src.bat_detector import YOLO_AVAILABLE
-        if YOLO_AVAILABLE:
-            show_bat_path_detected = st.sidebar.checkbox("バット軌道（物体検出）", value=False,
-                                                          help="YOLOv8でバットを検出して軌道を表示（初回はモデルDLあり）")
-        else:
-            show_bat_path_detected = False
-    except ImportError:
-        show_bat_path_detected = False
+    show_bat_path_detected = st.sidebar.checkbox("バット軌道（物体検出）", value=False,
+                                                  help="YOLOv8でバットを検出して軌道を表示（初回はモデルDLあり）")
 else:
     show_bat_path = False
     show_bat_path_detected = False
