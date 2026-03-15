@@ -616,6 +616,12 @@ def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30,
             grip_px = (int(rw[0] * w), int(rw[1] * h))
         cv2.line(overlay, grip_px, cur_tip_px, (255, 255, 255), 2, cv2.LINE_AA)
 
+    # デバッグ: 検出状況を画面左下に表示
+    n_motion = len(motion_tips) if motion_tips else 0
+    n_tips = len(tips)
+    cv2.putText(overlay, f"BatTip: {n_tips}pts (motion:{n_motion})",
+                (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
     result = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
     return result
 
