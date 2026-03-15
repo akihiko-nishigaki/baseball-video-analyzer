@@ -50,10 +50,69 @@ def draw_wrist_trajectory(frame, landmarks_history, current_frame,
     return result
 
 
-def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30):
-    """バットの軌道を推定して描画
+def _estimate_bat_tip(lm):
+    """1フレームのlandmarksからバット先端位置を推定
 
-    バットの先端は手首と指先の延長線上にあると推定。
+    推定ロジック:
+    1. 両手首の中点をグリップ位置とする
+    2. 肘→手首方向をバットの向きとする（指先より安定）
+    3. 肩幅を基準にバット長を動的計算（肩幅×約3.5 = 少年バット）
+
+    Args:
+        lm: landmarks リスト [(x, y, z, visibility), ...]
+
+    Returns:
+        (tip_x, tip_y) 正規化座標 or None
+    """
+    re = lm[14]  # 右肘
+    rw = lm[16]  # 右手首
+    le = lm[13]  # 左肘
+    lw = lm[15]  # 左手首
+    ls = lm[11]  # 左肩
+    rs = lm[12]  # 右肩
+
+    # 右肘・右手首は必須
+    if re[3] < 0.5 or rw[3] < 0.5:
+        return None
+
+    # グリップ位置: 両手首が見えれば中点、片方のみなら右手首
+    if lw[3] > 0.5:
+        grip_x = (rw[0] + lw[0]) / 2
+        grip_y = (rw[1] + lw[1]) / 2
+    else:
+        grip_x = rw[0]
+        grip_y = rw[1]
+
+    # バットの方向: 肘→手首のベクトル（指先より安定）
+    dx = rw[0] - re[0]
+    dy = rw[1] - re[1]
+    forearm_len = np.sqrt(dx ** 2 + dy ** 2)
+    if forearm_len < 0.001:
+        return None
+
+    # バット長の推定: 肩幅基準で動的計算
+    if ls[3] > 0.5 and rs[3] > 0.5:
+        shoulder_w = np.sqrt((rs[0] - ls[0]) ** 2 + (rs[1] - ls[1]) ** 2)
+        # 少年バット≒肩幅の3.5倍、前腕からの比率に換算
+        bat_length = shoulder_w * 3.5
+    else:
+        # 肩幅不明時: 前腕の4.5倍（大まかな推定）
+        bat_length = forearm_len * 4.5
+
+    # 方向を正規化して延長
+    dir_x = dx / forearm_len
+    dir_y = dy / forearm_len
+
+    tip_x = grip_x + dir_x * bat_length
+    tip_y = grip_y + dir_y * bat_length
+
+    return (tip_x, tip_y)
+
+
+def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30):
+    """バットの軌道を推定して描画（改善版）
+
+    肘→手首方向 + 肩幅基準スケールでバット先端を推定。
 
     Args:
         frame: BGR画像
@@ -76,23 +135,9 @@ def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30):
             bat_tips.append(None)
             continue
 
-        # 右手首(16)と右人差し指(20)を使ってバット先端を推定
-        rw = lm[16]  # 右手首
-        ri = lm[20]  # 右人差し指
-
-        if rw[3] > 0.5 and ri[3] > 0.5:
-            # 手首→指先の方向に延長（バットの長さ分）
-            dx = ri[0] - rw[0]
-            dy = ri[1] - rw[1]
-            length = np.sqrt(dx**2 + dy**2)
-            if length > 0.001:
-                # バットの長さ = 手首→指先の約3倍と仮定
-                scale = 3.0
-                bat_x = rw[0] + dx * scale
-                bat_y = rw[1] + dy * scale
-                bat_tips.append((int(bat_x * w), int(bat_y * h)))
-            else:
-                bat_tips.append(None)
+        tip = _estimate_bat_tip(lm)
+        if tip:
+            bat_tips.append((int(tip[0] * w), int(tip[1] * h)))
         else:
             bat_tips.append(None)
 
@@ -112,11 +157,16 @@ def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30):
         cv2.circle(overlay, last_pt, 8, (0, 200, 255), -1, cv2.LINE_AA)
         cv2.circle(overlay, last_pt, 8, (255, 255, 255), 2, cv2.LINE_AA)
 
-    # 現フレームのバットの線（手首→バット先端）
+    # 現フレームのバットの線（グリップ→バット先端）
     lm = landmarks_history.get(current_frame)
     if lm and lm[16][3] > 0.5 and bat_tips and bat_tips[-1]:
-        wrist_px = (int(lm[16][0] * w), int(lm[16][1] * h))
-        cv2.line(overlay, wrist_px, bat_tips[-1], (255, 255, 255), 2, cv2.LINE_AA)
+        rw = lm[16]
+        lw = lm[15]
+        if lw[3] > 0.5:
+            grip_px = (int((rw[0] + lw[0]) / 2 * w), int((rw[1] + lw[1]) / 2 * h))
+        else:
+            grip_px = (int(rw[0] * w), int(rw[1] * h))
+        cv2.line(overlay, grip_px, bat_tips[-1], (255, 255, 255), 2, cv2.LINE_AA)
 
     result = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
     return result
