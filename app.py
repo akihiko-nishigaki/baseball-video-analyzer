@@ -19,7 +19,7 @@ from src.angle_analyzer import (
 )
 from src.swing_detector import calc_wrist_speed, detect_swings, calc_swing_metrics, calc_weight_shift
 from src.phase_detector import detect_batting_phases, get_phase_at_frame, get_phase_checkpoints, BATTING_PHASES
-from src.trajectory import draw_wrist_trajectory, draw_bat_path, draw_phase_indicator, calc_swing_arc_angle, draw_ghost_skeletons, draw_detected_bat_path, compute_motion_bat_tips
+from src.trajectory import draw_wrist_trajectory, draw_bat_path, draw_phase_indicator, calc_swing_arc_angle, draw_ghost_skeletons, compute_motion_bat_tips
 from src.form_checker import check_batting_form, calc_head_stability, detect_body_opening_timing, create_sequential_photos
 from src.batting_evaluator import evaluate_batting
 from src.pitching_detector import (
@@ -104,8 +104,6 @@ def init_session():
         "all_angles": {},
         "cog_history": [],
         "rotation_history": [],
-        # Bat detection (YOLO)
-        "bat_detections": {},
         # Bat tip (motion-based)
         "motion_bat_tips": {},
         # Phase 2
@@ -197,7 +195,6 @@ if uploaded:
         st.session_state.head_stability = None
         st.session_state.body_opening = None
         st.session_state.sequential_photo = None
-        st.session_state.bat_detections = {}
         st.session_state.motion_bat_tips = {}
         st.session_state.current_frame = 0
 
@@ -252,12 +249,9 @@ if mode == "ピッチング":
 st.sidebar.markdown("### 軌跡表示")
 show_wrist_trail = st.sidebar.checkbox("手首の軌跡", value=True)
 if mode == "バッティング":
-    show_bat_path = st.sidebar.checkbox("バット軌道（推定）", value=False)
-    show_bat_path_detected = st.sidebar.checkbox("バット軌道（物体検出）", value=False,
-                                                  help="YOLOv8でバットを検出して軌道を表示（初回はモデルDLあり）")
+    show_bat_path = st.sidebar.checkbox("バット軌道", value=False)
 else:
     show_bat_path = False
-    show_bat_path_detected = False
 show_ghost = st.sidebar.checkbox("残像表示（ゴースト）", value=False,
                                   help="過去5フレーム分の骨格を半透明で表示")
 show_phase_banner = st.sidebar.checkbox("フェーズ表示", value=True)
@@ -859,23 +853,6 @@ if not st.session_state.is_analyzed:
                 ),
             )
 
-        # Step 4: バット物体検出（有効時のみ）
-        bat_detections = {}
-        if show_bat_path_detected and mode == "バッティング":
-            try:
-                from src.bat_detector import BatDetector
-                progress.progress(0.95, text="バットを検出中（YOLO）...")
-                bat_det = BatDetector(model_size="n", confidence=0.15)
-                bat_detections = bat_det.detect_all_frames(
-                    reader, all_landmarks,
-                    progress_cb=lambda cur, tot: progress.progress(
-                        0.95 + 0.04 * cur / tot,
-                        text=f"バット検出中... {cur}/{tot}"
-                    ),
-                )
-            except ImportError:
-                st.warning("ultralytics未インストール: pip install ultralytics")
-
         progress.progress(1.0, text="完了！")
         progress.empty()
 
@@ -899,7 +876,6 @@ if not st.session_state.is_analyzed:
         st.session_state.pitching_evaluation = pitching_evaluation
         st.session_state.release_info = release_info
         st.session_state.arm_slot = arm_slot_val
-        st.session_state.bat_detections = bat_detections
         st.session_state.motion_bat_tips = motion_bat_tips
         st.session_state.is_analyzed = True
         st.rerun()
@@ -1146,19 +1122,12 @@ if frame is not None:
             trail_length=40,
         )
 
-    # バット軌道（推定）
+    # バット軌道
     if show_bat_path:
         frame = draw_bat_path(
             frame, st.session_state.all_landmarks, frame_idx,
             trail_length=30,
             motion_tips=st.session_state.get("motion_bat_tips"),
-        )
-
-    # バット軌道（物体検出）
-    if show_bat_path_detected and st.session_state.get("bat_detections"):
-        frame = draw_detected_bat_path(
-            frame, st.session_state.bat_detections, frame_idx,
-            trail_length=30,
         )
 
     # フェーズ表示バナー（ピッチング時のみ）
