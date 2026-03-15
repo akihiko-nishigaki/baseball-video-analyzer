@@ -257,3 +257,61 @@ def calc_swing_arc_angle(landmarks_history, swing):
     # Y軸は下向きなので反転
     arc_angle = -np.degrees(np.arctan2(dy, abs(dx)))
     return arc_angle
+
+
+def draw_detected_bat_path(frame, bat_detections, current_frame, trail_length=30):
+    """YOLO検出結果に基づくバット先端軌道を描画
+
+    Args:
+        frame: BGR画像
+        bat_detections: {frame_idx: detection_result} BatDetector の検出結果
+        current_frame: 現在のフレーム番号
+        trail_length: 軌跡の長さ（フレーム数）
+
+    Returns:
+        描画済みフレーム
+    """
+    overlay = frame.copy()
+    trail_start = max(0, current_frame - trail_length)
+
+    # 軌跡用の先端座標を収集
+    tips = []
+    for f in range(trail_start, current_frame + 1):
+        det = bat_detections.get(f)
+        if det and det["tip"]:
+            tips.append((f, (int(det["tip"][0]), int(det["tip"][1]))))
+
+    # 軌跡を緑系グラデーションで描画
+    for j in range(1, len(tips)):
+        _, pt = tips[j]
+        _, prev_pt = tips[j - 1]
+        alpha = (j + 1) / len(tips)
+        color = (int(50 * alpha), int(255 * alpha), int(50 * alpha))
+        thickness = max(1, int(4 * alpha))
+        cv2.line(overlay, prev_pt, pt, color, thickness, cv2.LINE_AA)
+
+    # 現在フレームの検出情報を描画
+    det = bat_detections.get(current_frame)
+    if det:
+        tip = (int(det["tip"][0]), int(det["tip"][1]))
+        handle = (int(det["handle"][0]), int(det["handle"][1]))
+
+        # バットの線（グリップ→先端）
+        cv2.line(overlay, handle, tip, (100, 255, 100), 2, cv2.LINE_AA)
+
+        # 先端マーカー
+        cv2.circle(overlay, tip, 8, (0, 255, 0), -1, cv2.LINE_AA)
+        cv2.circle(overlay, tip, 8, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # バウンディングボックス（薄く）
+        x1, y1, x2, y2 = det["bbox"]
+        cv2.rectangle(overlay, (int(x1), int(y1)), (int(x2), int(y2)),
+                      (100, 255, 100), 1, cv2.LINE_AA)
+
+        # 信頼度ラベル
+        conf = det["confidence"]
+        cv2.putText(overlay, f"bat {conf:.0%}", (int(x1), int(y1) - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1, cv2.LINE_AA)
+
+    result = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
+    return result
