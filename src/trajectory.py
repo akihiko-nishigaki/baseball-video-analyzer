@@ -51,7 +51,11 @@ def draw_wrist_trajectory(frame, landmarks_history, current_frame,
 
 
 def _estimate_bat_tip(lm):
-    """1フレームのlandmarksからバット先端位置を推定（フォールバック用）
+    """1フレームのlandmarksからバット先端位置を推定
+
+    MediaPoseの骨格情報から手首→指先方向にバット長さ分延長して先端を推定。
+    スイング中も検出できるよう、visibility閾値を低めに設定し、
+    右手・左手の両方を試行する。
 
     Args:
         lm: landmarks リスト [(x, y, z, visibility), ...]
@@ -59,41 +63,77 @@ def _estimate_bat_tip(lm):
     Returns:
         (tip_x, tip_y) 正規化座標 or None
     """
-    VIS = 0.25
+    VIS = 0.1  # スイング中のブレにも対応（0.25→0.1）
 
+    # 右手系: 右手首(16), 右人差指(20), 右肘(14), 左手首(15)
     rw = lm[16]
     ri = lm[20]
     re = lm[14]
     lw = lm[15]
+    # 左手系: 左手首(15), 左人差指(19), 左肘(13)
+    li = lm[19]
+    le = lm[13]
 
-    if rw[3] < VIS:
+    # 両手首のうち見えている方を優先（両方見えれば中点をグリップ）
+    r_vis = rw[3] >= VIS
+    l_vis = lw[3] >= VIS
+
+    if not r_vis and not l_vis:
         return None
 
-    if lw[3] > VIS:
+    if r_vis and l_vis:
         grip_x = (rw[0] + lw[0]) / 2
         grip_y = (rw[1] + lw[1]) / 2
-    else:
+    elif r_vis:
         grip_x, grip_y = rw[0], rw[1]
+    else:
+        grip_x, grip_y = lw[0], lw[1]
 
-    if ri[3] > VIS:
+    # 方向推定の優先順: 人差指 → 肘（逆方向）→ 肩→手首
+    BAT_SCALE = 3.5
+    ELBOW_SCALE = 2.5
+
+    # 1) 右人差指からの方向
+    if ri[3] >= VIS and r_vis:
         dx = ri[0] - rw[0]
         dy = ri[1] - rw[1]
-        ref_len = np.sqrt(dx ** 2 + dy ** 2)
-        if ref_len > 0.005:
-            scale = 3.5
-            tip_x = grip_x + (dx / ref_len) * ref_len * scale
-            tip_y = grip_y + (dy / ref_len) * ref_len * scale
+        ref_len = np.sqrt(dx**2 + dy**2)
+        if ref_len > 0.003:
+            tip_x = grip_x + (dx / ref_len) * ref_len * BAT_SCALE
+            tip_y = grip_y + (dy / ref_len) * ref_len * BAT_SCALE
             return (tip_x, tip_y)
 
-    if re[3] > VIS:
+    # 2) 左人差指からの方向
+    if li[3] >= VIS and l_vis:
+        dx = li[0] - lw[0]
+        dy = li[1] - lw[1]
+        ref_len = np.sqrt(dx**2 + dy**2)
+        if ref_len > 0.003:
+            tip_x = grip_x + (dx / ref_len) * ref_len * BAT_SCALE
+            tip_y = grip_y + (dy / ref_len) * ref_len * BAT_SCALE
+            return (tip_x, tip_y)
+
+    # 3) 右肘→手首方向に延長
+    if re[3] >= VIS and r_vis:
         dx = rw[0] - re[0]
         dy = rw[1] - re[1]
-        ref_len = np.sqrt(dx ** 2 + dy ** 2)
-        if ref_len > 0.005:
-            scale = 2.5
-            tip_x = grip_x + (dx / ref_len) * ref_len * scale
-            tip_y = grip_y + (dy / ref_len) * ref_len * scale
+        ref_len = np.sqrt(dx**2 + dy**2)
+        if ref_len > 0.003:
+            tip_x = grip_x + (dx / ref_len) * ref_len * ELBOW_SCALE
+            tip_y = grip_y + (dy / ref_len) * ref_len * ELBOW_SCALE
             return (tip_x, tip_y)
+
+    # 4) 左肘→手首方向に延長
+    if le[3] >= VIS and l_vis:
+        dx = lw[0] - le[0]
+        dy = lw[1] - le[1]
+        ref_len = np.sqrt(dx**2 + dy**2)
+        if ref_len > 0.003:
+            tip_x = grip_x + (dx / ref_len) * ref_len * ELBOW_SCALE
+            tip_y = grip_y + (dy / ref_len) * ref_len * ELBOW_SCALE
+            return (tip_x, tip_y)
+
+    return None
 
     return None
 
@@ -563,15 +603,9 @@ def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30,
 
     trail_start = max(0, current_frame - trail_length)
 
-    # 先端座標を収集（モーション検出 > 推定 の優先順位）
+    # 先端座標を収集（MediaPipe骨格推定ベース）
     raw_tips = []
     for f in range(trail_start, current_frame + 1):
-        # モーション検出結果があればそちらを使う
-        if motion_tips and f in motion_tips:
-            raw_tips.append((f, motion_tips[f]))
-            continue
-
-        # フォールバック: MediaPipe推定
         lm = landmarks_history.get(f)
         if lm is None:
             continue
@@ -579,8 +613,8 @@ def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30,
         if tip:
             raw_tips.append((f, (int(tip[0] * w), int(tip[1] * h))))
 
-    # 欠落フレームを線形補間で埋める
-    tips = _interpolate_tips(raw_tips, max_gap=6)
+    # 欠落フレームを線形補間で埋める（max_gap拡大で途切れ軽減）
+    tips = _interpolate_tips(raw_tips, max_gap=10)
 
     # バット軌道を描画
     for j in range(1, len(tips)):
@@ -615,12 +649,6 @@ def draw_bat_path(frame, landmarks_history, current_frame, trail_length=30,
         else:
             grip_px = (int(rw[0] * w), int(rw[1] * h))
         cv2.line(overlay, grip_px, cur_tip_px, (255, 255, 255), 2, cv2.LINE_AA)
-
-    # デバッグ: 検出状況を画面左下に表示
-    n_motion = len(motion_tips) if motion_tips else 0
-    n_tips = len(tips)
-    cv2.putText(overlay, f"BatTip: {n_tips}pts (motion:{n_motion})",
-                (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
     result = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
     return result

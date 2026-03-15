@@ -841,17 +841,9 @@ if not st.session_state.is_analyzed:
                 pitching_evaluation = evaluate_pitching(
                     all_landmarks, best_pitch, reader.fps, arm=arm)
 
-        # Step 3: モーションベースのバット先端検出（バッティング時）
+        # Step 3: バット先端はMediaPipe骨格推定で表示時にリアルタイム計算
+        # （重いモーション検出パイプラインは精度不足のため無効化）
         motion_bat_tips = {}
-        if show_bat_path and mode == "バッティング":
-            progress.progress(0.92, text="バット先端をモーション検出中...")
-            motion_bat_tips = compute_motion_bat_tips(
-                reader, all_landmarks,
-                progress_cb=lambda cur, tot: progress.progress(
-                    0.92 + 0.05 * cur / max(1, tot),
-                    text=f"バット先端検出中... {cur}/{tot}"
-                ),
-            )
 
         progress.progress(1.0, text="完了！")
         progress.empty()
